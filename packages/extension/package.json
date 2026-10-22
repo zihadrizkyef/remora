@@ -1,0 +1,21 @@
+{
+  "name": "@remora/extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remora Chrome extension (MV3): WebSocket client + content scripts + popup.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@remora/protocol": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "@types/node": "^20.16.10",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.6.3"
+  }
+}

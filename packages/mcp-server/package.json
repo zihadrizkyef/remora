@@ -1,0 +1,29 @@
+{
+  "name": "@remora/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remora MCP server: MCP stdio + WebSocket hub for the Chrome extension.",
+  "type": "module",
+  "bin": {
+    "remora-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "dev": "node dist/index.js",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@remora/protocol": "0.1.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.10",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}

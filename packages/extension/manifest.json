@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Remora — agent Browser Bridge",
+  "version": "0.1.0",
+  "description": "Let your AI agent see and drive Chrome: tabs, pages, screenshots, clicks, uploads. Localhost only.",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Remora",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "permissions": [
+    "tabs",
+    "storage",
+    "scripting",
+    "webRequest",
+    "cookies",
+    "clipboardWrite",
+    "downloads",
+    "activeTab",
+    "alarms",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "web_accessible_resources": []
+}

@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Remora</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+<div class="popup" id="popup" data-state="disconnected" role="dialog" aria-label="Remora popup">
+  <div class="pop-head">
+    <div class="logo" aria-hidden="true">
+      <img src="icons/icon-32.png" width="20" height="20" alt="">
+    </div>
+    <div class="pop-title"><b>Remora</b><small id="version">v0.1.0</small></div>
+    <div class="conn">
+      <span class="dot pulse" id="conn-dot" aria-hidden="true"></span>
+      <span class="conn-label" id="conn-label">Terputus</span>
+      <button class="btn btn-accent btn-sm" id="btn-reconnect" type="button">Reconnect</button>
+    </div>
+  </div>
+  <div class="banner">Koneksi ke MCP terputus. Pastikan server berjalan, lalu tekan Reconnect.</div>
+
+  <div class="pop-body">
+    <section class="sec" aria-label="Pairing">
+      <h2>Pairing MCP</h2>
+      <div class="stack">
+        <div class="pairing-panel" id="pairing-panel">
+          <div class="row-between">
+            <b style="font-size:12.5px;color:#f5d98b">Mode pairing aktif</b>
+            <span class="pill-tag on" style="background:#3a2f14;color:#fbbf24">token baru</span>
+          </div>
+          <ol>
+            <li>Salin config di bawah ke MCP client (Claude Desktop / ZCode).</li>
+            <li>Restart MCP client, lalu tekan Reconnect.</li>
+          </ol>
+          <pre id="pairing-config"></pre>
+        </div>
+        <div class="card stack">
+          <div class="token-row">
+            <input id="token" type="password" readonly value="" placeholder="Belum ada token — tekan Regenerate" aria-label="Token pairing">
+            <button class="icon-btn" id="btn-show" type="button" title="Tampilkan/sembunyikan token" aria-label="Tampilkan token">◉</button>
+            <button class="icon-btn" id="btn-copy-token" type="button" title="Salin token" aria-label="Salin token">⧉</button>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-ghost" id="btn-copy-config" type="button">Copy MCP config JSON</button>
+            <button class="btn btn-danger-ghost" id="btn-regen" type="button">Regenerate</button>
+          </div>
+          <p class="hint">Token hanya tersimpan lokal (<code>127.0.0.1</code>). Regenerate memutus sesi lama.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" aria-label="Permissions">
+      <h2>Permissions</h2>
+      <div class="card">
+        <div class="perm-row">
+          <div class="perm-info"><b>JS eval <span class="pill-tag off" id="tag-js">OFF</span></b><small>Gerbang <code>evaluate_js</code> · default OFF</small></div>
+          <label class="switch"><input type="checkbox" id="tgl-js" aria-label="JS eval"><span class="track"></span><span class="thumb"></span></label>
+        </div>
+        <div class="perm-row">
+          <div class="perm-info"><b>Network capture <span class="pill-tag off" id="tag-net">OFF</span></b><small>Gerbang <code>net_capture_*</code> · default OFF</small></div>
+          <label class="switch"><input type="checkbox" id="tgl-net" aria-label="Network capture"><span class="track"></span><span class="thumb"></span></label>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" aria-label="Kill-switch per situs">
+      <h2>Kill-switch situs</h2>
+      <div class="card" id="site-list">
+        <div class="site-empty">Memuat…</div>
+      </div>
+    </section>
+
+    <section class="sec" aria-label="Aktivitas terakhir">
+      <div class="log-head">
+        <h2>Aktivitas terakhir</h2>
+        <button class="btn btn-ghost btn-sm" id="btn-clear" type="button">Clear</button>
+      </div>
+      <div class="log is-empty" id="log">
+        <table aria-label="Log aktivitas agent">
+          <tbody id="log-body"></tbody>
+        </table>
+        <div class="log-empty">Belum ada aktivitas.</div>
+      </div>
+    </section>
+  </div>
+
+  <div class="pop-foot">
+    <a href="#" id="docs-link">Dokumentasi</a>
+    <span class="ws">ws <b id="ws-state">●</b> <span id="ws-addr">127.0.0.1:47291</span> · <span id="ws-lat">—</span></span>
+  </div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script type="module" src="popup.js"></script>
+</body>
+</html>

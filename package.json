@@ -1,0 +1,19 @@
+{
+  "name": "remora",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remora — Chrome Extension + MCP Bridge. Gives AI agents full access to the user's Chrome.",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace=@remora/protocol && npm run build --workspace=@remora/mcp-server && npm run build --workspace=@remora/extension",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "dev:mcp": "npm run dev --workspace=@remora/mcp-server"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
