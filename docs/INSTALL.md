@@ -89,6 +89,27 @@ Jika `remora_status` bilang tidak terhubung: pastikan Chrome terbuka,
 extension aktif (bukan abu-abu), token sama di kedua sisi, dan tidak ada
 aplikasi lain memakai port 47291.
 
+### Beberapa sesi agent sekaligus
+
+Setiap sesi MCP men-spawn proses server sendiri, dan semuanya memakai port
+yang sama. Hanya satu proses yang bisa memegang port; proses lain otomatis
+**attach** ke hub itu lewat channel kontrol localhost, lalu meneruskan
+request lewat hub tersebut. Semua sesi tetap mendapat 54 tool dan bisa
+mengendalikan Chrome yang sama.
+
+`remora_status` melaporkan peran proses lewat `hubRole`:
+
+- `primary` — proses ini memegang port dan bicara langsung ke extension.
+- `attached` — proses ini menumpang ke hub milik sesi lain.
+
+Kalau proses `primary` berhenti, salah satu proses `attached` mengambil alih
+port dalam ~1 detik dan extension reconnect otomatis. Tidak perlu restart
+ZCode.
+
+Kalau startup gagal dengan pesan `does not speak the Remora control
+protocol`, berarti port 47291 dipegang program lain (bukan Remora). Bebaskan
+port itu, atau ganti `REMORA_PORT` di config MCP **dan** di popup extension.
+
 ## 6. Toggle Pengaman
 
 Default aman:
