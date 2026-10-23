@@ -26,6 +26,8 @@ const HANDLERS: Record<string, (ctx: Ctx, args: never) => Promise<unknown>> = {
   tab_pin: (ctx, a) => H.tab_pin(ctx, a),
   tab_mute: (ctx, a) => H.tab_mute(ctx, a),
   tab_move: (ctx, a) => H.tab_move(ctx, a),
+  tab_claim: (ctx, a) => H.tab_claim(ctx, a),
+  tab_release: (ctx, a) => H.tab_release(ctx, a),
   windows_list: (ctx) => H.windows_list(ctx),
   navigate: (ctx, a) => H.navigate(ctx, a),
   go_back: (ctx, a) => H.go_back(ctx, a),
@@ -81,7 +83,12 @@ function isScreenshotResult(value: unknown): value is { base64: string; mimeType
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const hub = new RemoraHub({ port: config.port, token: config.token });
+  const hub = new RemoraHub({
+    port: config.port,
+    token: config.token,
+    agentId: config.agentId,
+    ownerLabel: config.ownerLabel,
+  });
   const ctx: Ctx = { hub };
 
   // Verify catalog and handlers agree, so a missing tool fails loudly at boot.

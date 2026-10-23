@@ -10,6 +10,10 @@ export interface RemoraConfig {
   configPath: string;
   /** True when the token was freshly generated on this run. */
   freshToken: boolean;
+  /** Stable id for this MCP process (claim owner). */
+  agentId: string;
+  /** Short human label shown to other agents on claimed tabs. */
+  ownerLabel: string;
 }
 
 function configDir(): string {
@@ -31,6 +35,11 @@ function readJsonFile(path: string): Record<string, unknown> | null {
 /**
  * Resolve port + auth token. Precedence: env vars > config file > generate.
  * A generated token is persisted so the extension pairing survives restarts.
+ *
+ * Each MCP process also gets a stable agent id for tab claims: explicit
+ * REMORA_AGENT_ID wins, else the stored agentId, else a fresh random one
+ * that is persisted alongside the token. The owner label defaults to the
+ * client name when known (REMORA_CLIENT, e.g. `ZCode`), else `agent`.
  */
 export function loadConfig(): RemoraConfig {
   const dir = configDir();
@@ -47,16 +56,32 @@ export function loadConfig(): RemoraConfig {
       : null;
 
   let freshToken = false;
+  let agentId = typeof process.env.REMORA_AGENT_ID === "string" && process.env.REMORA_AGENT_ID
+    ? process.env.REMORA_AGENT_ID
+    : typeof stored.agentId === "string" && stored.agentId
+      ? stored.agentId
+      : randomBytes(6).toString("hex");
   if (!token) {
     token = randomBytes(24).toString("hex");
     freshToken = true;
+  }
+  const client = typeof process.env.REMORA_CLIENT === "string" && process.env.REMORA_CLIENT
+    ? process.env.REMORA_CLIENT
+    : typeof stored.client === "string" && stored.client
+      ? stored.client
+      : "agent";
+  const ownerLabel = `${client} ${agentId.slice(-6)}`;
+
+  if (freshToken || stored.agentId !== agentId) {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(configPath, JSON.stringify({ port, token }, null, 2) + "\n", {
-      mode: 0o600,
-    });
+    writeFileSync(
+      configPath,
+      JSON.stringify({ port, token, agentId, client }, null, 2) + "\n",
+      { mode: 0o600 },
+    );
   }
 
-  return { port, token, configPath, freshToken };
+  return { port, token, configPath, freshToken, agentId, ownerLabel };
 }
 
 /** MCP client config snippet the popup offers as copy-paste. */

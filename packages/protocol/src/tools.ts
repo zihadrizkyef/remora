@@ -48,6 +48,11 @@ export const TOOL_DEFS: ToolDef[] = [
     index: z.number().int().describe("New zero-based index"),
     windowId: z.number().int().describe("Target window id (optional)").optional(),
   }),
+  def("tab_claim", "Claim a tab for exclusive use by this agent session. Other sessions are blocked from touching it until released. Tabs you create are auto-claimed.", "claiming tab", {
+    tabId,
+    note: z.string().describe("Short note shown to other agents, e.g. what you are doing").optional(),
+  }),
+  def("tab_release", "Release a tab you claimed so other agents may use it.", "releasing tab", { tabId }),
   def("windows_list", "List browser windows (id, focused, tab count).", "listing windows", {}),
 
   // -- navigation ---------------------------------------------------------------

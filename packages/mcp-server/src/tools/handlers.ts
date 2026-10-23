@@ -46,6 +46,10 @@ export function toAgentError(err: unknown): Error {
         return toolError(`Not allowed: ${err.message}. Check the Remora popup toggles.`);
       case "SITE_BLOCKED":
         return toolError("This site is blocked by the user's per-site kill-switch. Stop and tell the user.");
+      case "TAB_CLAIMED":
+        return toolError(
+          `${err.message} Call tabs_list to see claimed tabs, then tab_create to work in your own tab.`,
+        );
       case "NO_TAB":
         return toolError("Tab not found (it may have been closed). Call `tabs_list` for current tabs.");
       default:
@@ -73,6 +77,39 @@ function touched(ctx: Ctx, tabId: number | undefined, activity: string, target?:
   ctx.hub.showActivity(tabId, activity, target);
 }
 
+/**
+ * Guard a mutating tool against another session's claim. Throws a
+ * TAB_CLAIMED tool error naming the owner. Returns the resolved tabId for
+ * activity reporting (may be undefined when the tab is implicit and the
+ * active tab could not be determined — the extension call then fails as
+ * before).
+ */
+async function guard(ctx: Ctx, tabId?: number): Promise<number | undefined> {
+  try {
+    return await ctx.hub.guardTab(tabId);
+  } catch (err) {
+    throw toAgentError(err);
+  }
+}
+
+/** Attach `claimedBy` info to tab rows so agents can avoid owned tabs. */
+function withClaims(ctx: Ctx, tabs: unknown): unknown {
+  if (!Array.isArray(tabs)) return tabs;
+  const byId = new Map(ctx.hub.listClaims().map((c) => [c.tabId, c]));
+  if (byId.size === 0) return tabs;
+  return tabs.map((t) => {
+    if (typeof t !== "object" || t === null || typeof (t as { id?: unknown }).id !== "number") return t;
+    const claim = byId.get((t as { id: number }).id);
+    if (!claim) return t;
+    return {
+      ...(t as Record<string, unknown>),
+      claimedBy: claim.ownerLabel ?? claim.agentId,
+      ...(claim.note ? { claimNote: claim.note } : {}),
+      claimedByMe: claim.agentId === ctx.hub.agentId,
+    };
+  });
+}
+
 /** Resolve "active tab" early so activity is attributed even when tabId is omitted. */
 async function resolveTabId(ctx: Ctx, tabId?: number): Promise<number | undefined> {
   if (tabId !== undefined) return tabId;
@@ -93,30 +130,50 @@ export async function remora_status(ctx: Ctx): Promise<unknown> {
     target: a.target,
     ts: a.ts,
   }));
+  // Every MCP session shares one hub; `hubRole` tells a user whether this
+  // process owns the port or is forwarding to the session that does.
+  const hubRole = ctx.hub.isPrimary ? "primary" : "attached";
   if (!ctx.hub.connected) {
     return {
       connected: false,
+      hubRole,
       hint: "Extension not connected. Ask the user to open Chrome with Remora installed and paired.",
       activeTabs: active,
+      claims: ctx.hub.listClaims(),
     };
   }
   const ext = ctx.hub.extension;
   return {
     connected: true,
+    hubRole,
     extensionVersion: ext?.version ?? "unknown",
     protocol: ext?.protocol ?? 1,
     tabCount: ext?.tabCount ?? 0,
     activeTabs: active,
+    claims: ctx.hub.listClaims(),
+    agentId: ctx.hub.agentId,
   };
 }
 
 // -- tabs & windows -------------------------------------------------------------
 
 export async function tabs_list(ctx: Ctx): Promise<unknown> {
-  return call(ctx, "tabs.list", {});
+  const tabs = await call(ctx, "tabs.list", {});
+  // Drop claims for tabs that no longer exist; primary then broadcasts the trim.
+  if (Array.isArray(tabs) && ctx.hub.isPrimary) {
+    const ids = new Set<number>();
+    for (const t of tabs) {
+      if (typeof t === "object" && t !== null && typeof (t as { id?: unknown }).id === "number") {
+        ids.add((t as { id: number }).id);
+      }
+    }
+    ctx.hub.pruneClaims(ids);
+  }
+  return withClaims(ctx, tabs);
 }
 
 export async function tab_activate(ctx: Ctx, args: { tabId: number }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "tabs.activate", args);
   touched(ctx, args.tabId, "activated tab");
   return r;
@@ -124,11 +181,42 @@ export async function tab_activate(ctx: Ctx, args: { tabId: number }): Promise<u
 
 export async function tab_create(ctx: Ctx, args: { url?: string; active?: boolean }): Promise<unknown> {
   const tab = await call<TabInfo>(ctx, "tabs.create", args);
+  // Own new tabs immediately so a second session never grabs them. Best
+  // effort: creation itself already succeeded.
+  await ctx.hub.claimTab(tab.id).catch(() => undefined);
   touched(ctx, tab.id, "opened tab", tab.url || tab.title);
-  return tab;
+  return withClaims(ctx, [tab]);
+}
+
+export async function tab_claim(ctx: Ctx, args: { tabId?: number; note?: string }): Promise<unknown> {
+  const id = await resolveTabId(ctx, args.tabId);
+  if (id === undefined) {
+    throw toolError("No tab to claim. Call tabs_list for current tabs, or tab_create for a fresh tab.");
+  }
+  try {
+    const claim = await ctx.hub.claimTab(id, args.note);
+    touched(ctx, id, "claimed tab", args.note);
+    return claim;
+  } catch (err) {
+    throw toAgentError(err);
+  }
+}
+
+export async function tab_release(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
+  const id = await resolveTabId(ctx, args.tabId);
+  if (id === undefined) {
+    throw toolError("No tab to release. Call tabs_list for current tabs.");
+  }
+  try {
+    const released = await ctx.hub.releaseTab(id);
+    return { released, tabId: id };
+  } catch (err) {
+    throw toAgentError(err);
+  }
 }
 
 export async function tab_close(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const id = await resolveTabId(ctx, args.tabId);
   const r = await call(ctx, "tabs.close", { tabId: args.tabId });
   if (id !== undefined) touched(ctx, id, "closed tab");
@@ -136,18 +224,23 @@ export async function tab_close(ctx: Ctx, args: { tabId?: number }): Promise<unk
 }
 
 export async function tab_duplicate(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const tab = await call<TabInfo>(ctx, "tabs.duplicate", { tabId: args.tabId });
+  // A duplicate is a fresh tab for this session — own it like tab_create.
+  await ctx.hub.claimTab(tab.id).catch(() => undefined);
   touched(ctx, tab.id, "duplicated tab", tab.title);
   return tab;
 }
 
 export async function tab_pin(ctx: Ctx, args: { tabId?: number; pinned: boolean }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "tabs.pin", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), args.pinned ? "pinned tab" : "unpinned tab");
   return r;
 }
 
 export async function tab_mute(ctx: Ctx, args: { tabId?: number; muted: boolean }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "tabs.mute", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), args.muted ? "muted tab" : "unmuted tab");
   return r;
@@ -157,6 +250,7 @@ export async function tab_move(
   ctx: Ctx,
   args: { tabId?: number; index: number; windowId?: number },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "tabs.move", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "moved tab");
   return r;
@@ -169,24 +263,28 @@ export async function windows_list(ctx: Ctx): Promise<unknown> {
 // -- navigation -------------------------------------------------------------------
 
 export async function navigate(ctx: Ctx, args: { tabId?: number; url: string }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "navigate", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "navigated", args.url);
   return r;
 }
 
 export async function go_back(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "nav.back", { tabId: args.tabId });
   touched(ctx, await resolveTabId(ctx, args.tabId), "went back");
   return r;
 }
 
 export async function go_forward(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "nav.forward", { tabId: args.tabId });
   touched(ctx, await resolveTabId(ctx, args.tabId), "went forward");
   return r;
 }
 
 export async function reload(ctx: Ctx, args: { tabId?: number; hard?: boolean }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "nav.reload", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "reloaded");
   return r;
@@ -258,6 +356,7 @@ export async function screenshot(
 }
 
 export async function screenshot_annotated(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const id = await resolveTabId(ctx, args.tabId);
   await call(ctx, "annotate.show", { tabId: args.tabId });
   try {
@@ -287,12 +386,14 @@ export async function click(
   ctx: Ctx,
   args: TargetArgs & { button?: "left" | "middle" | "right"; clickCount?: number },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "click", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "clicked", summarize("element", labelOf(args)));
   return r;
 }
 
 export async function hover(ctx: Ctx, args: TargetArgs): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "hover", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "hovered", labelOf(args));
   return r;
@@ -302,6 +403,7 @@ export async function type(
   ctx: Ctx,
   args: TargetArgs & { text: string; submit?: boolean; clearFirst?: boolean },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "type", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "typed", `into ${labelOf(args) ?? "field"}`);
   return r;
@@ -315,6 +417,7 @@ export async function fill_form(
     submit?: boolean;
   },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "form.fill", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "filled form", `${args.fields.length} fields`);
   return r;
@@ -324,12 +427,14 @@ export async function select_option(
   ctx: Ctx,
   args: TargetArgs & { values: string[] },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "select.option", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "selected option", args.values.join(", "));
   return r;
 }
 
 export async function set_checked(ctx: Ctx, args: TargetArgs & { checked: boolean }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "set.checked", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), args.checked ? "checked" : "unchecked", labelOf(args));
   return r;
@@ -343,6 +448,7 @@ export async function scroll(
     intoView?: boolean;
   },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "scroll", args);
   const what = args.intoView ? `to ${labelOf(args)}` : (args.direction ?? "page");
   touched(ctx, await resolveTabId(ctx, args.tabId), "scrolled", what);
@@ -361,18 +467,21 @@ export async function drag(
     toY?: number;
   },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "drag", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "dragged");
   return r;
 }
 
 export async function press_key(ctx: Ctx, args: TargetArgs & { key: string }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "press.key", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "pressed key", args.key);
   return r;
 }
 
 export async function focus(ctx: Ctx, args: TargetArgs): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "focus", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "focused", labelOf(args));
   return r;
@@ -390,6 +499,7 @@ export async function clipboard_write(ctx: Ctx, args: { text: string }): Promise
 }
 
 export async function clipboard_copy_from(ctx: Ctx, args: TargetArgs): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "clipboard.copyFrom", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "copied", labelOf(args));
   return r;
@@ -399,6 +509,7 @@ export async function clipboard_paste_to(
   ctx: Ctx,
   args: TargetArgs & { filePath?: string },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   if (args.filePath) {
     const file = await prepareFile(args.filePath);
     const id = await resolveTabId(ctx, args.tabId);
@@ -430,6 +541,7 @@ export async function wait_for(
   ctx: Ctx,
   args: { tabId?: number; selector?: string; text?: string; navigation?: boolean; timeoutMs?: number },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "wait.for", args, Math.min((args.timeoutMs ?? 30_000) + 5_000, 130_000));
   touched(
     ctx,
@@ -451,6 +563,7 @@ export async function evaluate_js(
   ctx: Ctx,
   args: { tabId?: number; expression: string; timeoutMs?: number },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "evaluate", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "ran script");
   return r;
@@ -475,6 +588,7 @@ export async function storage_get(
   ctx: Ctx,
   args: { tabId?: number; area: "local" | "session"; keys?: string[] },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "storage.get", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), `read ${args.area}Storage`);
   return r;
@@ -484,6 +598,7 @@ export async function storage_set(
   ctx: Ctx,
   args: { tabId?: number; area: "local" | "session"; entries?: Record<string, string>; remove?: string[] },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   if (!args.entries && !args.remove) throw toolError("Provide `entries` and/or `remove`.");
   const r = await call(ctx, "storage.set", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), `wrote ${args.area}Storage`);
@@ -496,12 +611,14 @@ export async function net_capture_start(
   ctx: Ctx,
   args: { tabId?: number; urlPattern?: string },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "net.captureStart", args);
   touched(ctx, await resolveTabId(ctx, args.tabId), "started capture", args.urlPattern);
   return r;
 }
 
 export async function net_capture_stop(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const r = await call(ctx, "net.captureStop", { tabId: args.tabId });
   touched(ctx, await resolveTabId(ctx, args.tabId), "stopped capture");
   return r;
@@ -527,6 +644,7 @@ export async function upload_file(
   ctx: Ctx,
   args: TargetArgs & { filePath: string },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   const file = await prepareFile(args.filePath);
   const r = await transferFile(ctx.hub, file, args, "inject");
   touched(ctx, await resolveTabId(ctx, args.tabId), "uploaded file", file.fileName);
@@ -537,6 +655,7 @@ export async function upload_files(
   ctx: Ctx,
   args: TargetArgs & { filePaths: string[] },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   if (args.filePaths.length > 10) throw toolError("Maximum 10 files per call.");
   const results: unknown[] = [];
   for (const p of args.filePaths) {
@@ -551,6 +670,7 @@ export async function drag_drop_files(
   ctx: Ctx,
   args: TargetArgs & { filePaths: string[] },
 ): Promise<unknown> {
+  await guard(ctx, args.tabId);
   if (args.filePaths.length > 10) throw toolError("Maximum 10 files per call.");
   const results: unknown[] = [];
   for (const p of args.filePaths) {

@@ -51,6 +51,7 @@ export const WireErrorCode = z.enum([
   "BAD_ARGS", // params failed validation
   "NOT_FOUND", // selector/coordinate/cookie/... not found
   "NAVIGATED", // page navigated mid-action, refs invalidated
+  "TAB_CLAIMED", // tab is claimed by another agent session
   "UPLOAD_ABORTED", // chunked transfer aborted or tab went away
   "FILE_TOO_LARGE", // exceeds UPLOAD_MAX_BYTES
   "UNKNOWN_METHOD", // method not implemented by this extension version

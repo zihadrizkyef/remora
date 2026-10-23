@@ -1,9 +1,25 @@
 # Katalog MCP Tools Remora
 
-54 tools. Semua argumen `tabId` opsional (default: tab aktif). Semua target
+56 tools. Semua argumen `tabId` opsional (default: tab aktif). Semua target
 elemen memakai `ref` (dari `snapshot`, disarankan) atau `selector` (CSS,
 fallback). Setiap tool yang menyentuh tab memicu indikator agent aktif
 (pill + badge + prefix judul).
+
+## Klaim tab (multi-agent)
+
+Setiap sesi agent punya identitas sendiri. Tab yang dibuat otomatis diklaim
+pemiliknya; tool yang MENGUBAH tab milik sesi lain gagal cepat dengan error
+`TAB_CLAIMED` yang menyebut pemiliknya. Tool baca (snapshot, screenshot,
+page_text, …) selalu lolos.
+
+| Tool | Argumen | Deskripsi |
+|---|---|---|
+| `tab_claim` | `tabId?`, `note?` | Klaim tab untuk sesi ini (eksklusif). |
+| `tab_release` | `tabId?` | Lepas klaim tab. |
+
+`tabs_list` menandai tab yang diklaim (`claimedBy`, `claimNote`,
+`claimedByMe`); `remora_status` mengembalikan daftar `claims` aktif.
+Klaim hilang saat tab ditutup atau sesi pemiliknya berhenti.
 
 Konvensi respons: JSON. `screenshot`/`screenshot_annotated` mengembalikan
 gambar + metadata ringkas.

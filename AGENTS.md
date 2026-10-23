@@ -94,11 +94,15 @@ Load extension: `chrome://extensions` → Developer mode → Load unpacked →
 - Komentar kode: hanya untuk constraint yang tak terlihat dari kode
   (mis. trik React native setter, batas MV3). Tanpa atribusi.
 
-## 6. Katalog MCP Tools (±54, full — tanpa MVP)
+## 6. Katalog MCP Tools (56, full — tanpa MVP)
 
-- Koneksi: `remora_status`
-- Tab & window: `tabs_list`, `tab_activate`, `tab_create`, `tab_close`,
-  `tab_duplicate`, `tab_pin`, `tab_mute`, `tab_move`, `windows_list`
+- Koneksi: `remora_status` (lapor `claims` aktif + `agentId` sesi ini)
+- Tab & window: `tabs_list` (tandai `claimedBy`/`claimNote`/`claimedByMe`),
+  `tab_activate`, `tab_create` (auto-klaim), `tab_claim`, `tab_release`,
+  `tab_close`, `tab_duplicate` (auto-klaim),
+  `tab_pin`, `tab_mute`, `tab_move`, `windows_list`
+- Klaim tab: tiap sesi agent punya identitas; tool pengubah tab milik sesi
+  lain gagal cepat `TAB_CLAIMED`; tool baca selalu lolos.
 - Navigasi: `navigate`, `go_back`, `go_forward`, `reload`
 - Persepsi: `snapshot`, `page_text`, `page_html`, `query`, `page_info`,
   `console_logs`, `page_errors`
