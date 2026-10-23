@@ -24,6 +24,33 @@ export const WS_PATH = "/remora";
 export const WS_HEARTBEAT_MS = 15_000;
 export const WS_REQUEST_TIMEOUT_MS = 60_000;
 
+/**
+ * The auth token travels in the WebSocket subprotocol list, not the URL:
+ * Chrome prints the full URL of every failed connection on the extension's
+ * Errors page. The token is hex-encoded so any value is a legal protocol name.
+ */
+export const WS_SUBPROTOCOL = "remora";
+const TOKEN_PROTOCOL_PREFIX = "remora.token.";
+
+export function tokenProtocols(token: string): string[] {
+  const hex = Array.from(new TextEncoder().encode(token), (b) => b.toString(16).padStart(2, "0")).join("");
+  return [WS_SUBPROTOCOL, `${TOKEN_PROTOCOL_PREFIX}${hex}`];
+}
+
+/** Extract the token from a `Sec-WebSocket-Protocol` header value. */
+export function tokenFromProtocols(header: string | undefined): string | null {
+  for (const raw of (header ?? "").split(",")) {
+    const p = raw.trim();
+    if (!p.startsWith(TOKEN_PROTOCOL_PREFIX)) continue;
+    const hex = p.slice(TOKEN_PROTOCOL_PREFIX.length);
+    if (!/^(?:[0-9a-f]{2})+$/.test(hex)) return null;
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    return new TextDecoder().decode(bytes);
+  }
+  return null;
+}
+
 /** Binary bytes per upload chunk (base64 inflates ~33% on the wire). */
 export const UPLOAD_CHUNK_BYTES = 192 * 1024;
 /** Hard cap for a single injected file. */

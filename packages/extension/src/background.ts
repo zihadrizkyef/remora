@@ -11,6 +11,7 @@ import {
   DEFAULT_WS_PORT,
   WS_PATH,
   WireErrorCode,
+  tokenProtocols,
   parseWireFrame,
   validateMethodParams,
 } from "@remora/protocol";
@@ -89,6 +90,7 @@ async function boot(): Promise<void> {
 chrome.tabs.onRemoved.addListener((tabId) => {
   capturingTabs.delete(tabId);
   sendEvent("tab_closed", { tabId });
+  recentActivity.delete(tabId);
   clearTabBadge(tabId).catch(() => undefined);
 });
 
@@ -111,12 +113,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     sendResponse({ ok: true });
     return false;
   }
+  if (type === "remora:ready") {
+    // A fresh page in a tab the agent touched <8s ago (e.g. right after
+    // `navigate`) gets the last activity back so the pill survives reloads.
+    const tabId = _sender.tab?.id;
+    const recent = tabId !== undefined ? recentActivity.get(tabId) : undefined;
+    if (recent && Date.now() - recent.ts < ACTIVITY_IDLE_MS) {
+      sendResponse({ active: true, action: recent.action, target: recent.target });
+    } else {
+      sendResponse({ active: false });
+    }
+    return false;
+  }
   return false;
 });
 
 let lastLatencyMs: number | undefined;
 let lastPingAt = 0;
 void lastPingAt;
+
+const WS_TIMEOUT_MS = 30_000;
+let wsTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
 // MV3 suspends the worker, so the socket can drop while idle; an alarms tick
 // reconnects it without relying on the worker staying alive.
@@ -134,7 +151,7 @@ if (chrome.alarms) {
 // ---------------------------------------------------------------------------
 
 function wsUrl(): string {
-  return `ws://127.0.0.1:${settingsPort}${WS_PATH}?token=${encodeURIComponent(settingsToken)}`;
+  return `ws://127.0.0.1:${settingsPort}${WS_PATH}`;
 }
 
 function connect(): void {
@@ -156,12 +173,13 @@ function connect(): void {
   wsReady = false;
   if (!settingsToken) return; // unpaired: popup will supply the token
 
-  const socket = new WebSocket(wsUrl());
+  const socket = new WebSocket(wsUrl(), tokenProtocols(settingsToken));
   ws = socket;
   socket.onopen = () => {
     if (ws !== socket) return;
     wsReady = true;
     reconnectDelayMs = 1000;
+    resetWsTimeout();
     void chrome.tabs.query({}).then((tabs) => {
       sendEvent("hello", {
         version: chrome.runtime.getManifest().version,
@@ -172,12 +190,14 @@ function connect(): void {
   };
   socket.onmessage = (ev) => {
     if (ws !== socket) return;
+    resetWsTimeout();
     void handleFrame(String(ev.data));
   };
   socket.onclose = () => {
     if (ws !== socket) return;
     wsReady = false;
     ws = null;
+    clearWsTimeout();
     scheduleReconnect();
   };
   socket.onerror = () => {
@@ -197,6 +217,23 @@ function detach(socket: WebSocket): void {
   socket.onerror = null;
 }
 
+function resetWsTimeout(): void {
+  if (wsTimeoutTimer) clearTimeout(wsTimeoutTimer);
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  wsTimeoutTimer = setTimeout(() => {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.close();
+    }
+  }, WS_TIMEOUT_MS);
+}
+
+function clearWsTimeout(): void {
+  if (wsTimeoutTimer) {
+    clearTimeout(wsTimeoutTimer);
+    wsTimeoutTimer = null;
+  }
+}
+
 function scheduleReconnect(): void {
   if (reconnectTimer) clearTimeout(reconnectTimer);
   reconnectTimer = setTimeout(
@@ -212,6 +249,11 @@ function send(obj: unknown): void {
   if (ws && wsReady && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(obj));
   }
+}
+
+function supportsContentScript(url: string | undefined): boolean {
+  if (!url) return false;
+  return url.startsWith("http://") || url.startsWith("https://");
 }
 
 function sendEvent(event: string, payload?: unknown): void {
@@ -257,6 +299,7 @@ function handleNotification(notification: string, payload: unknown): void {
   if (notification === "activity.show") {
     const p = payload as { tabId?: number; action?: string; target?: string };
     if (typeof p?.tabId !== "number") return;
+    recentActivity.set(p.tabId, { action: p.action, target: p.target, ts: Date.now() });
     void setTabBadge(p.tabId, p.action, p.target);
     void appendActivityLog(p.tabId, p.action ?? "working", p.target);
     void chrome.tabs
@@ -286,7 +329,9 @@ async function appendActivityLog(tabId: number, action: string, target?: string)
 // Activity badge
 // ---------------------------------------------------------------------------
 
+const ACTIVITY_IDLE_MS = 8000;
 const badgeTimers = new Map<number, ReturnType<typeof setTimeout>>();
+const recentActivity = new Map<number, { action?: string; target?: string; ts: number }>();
 
 async function setTabBadge(tabId: number, action?: string, target?: string): Promise<void> {
   try {
@@ -304,7 +349,7 @@ async function setTabBadge(tabId: number, action?: string, target?: string): Pro
     setTimeout(() => {
       badgeTimers.delete(tabId);
       clearTabBadge(tabId).catch(() => undefined);
-    }, 8000),
+    }, ACTIVITY_IDLE_MS),
   );
 }
 
@@ -651,11 +696,6 @@ async function dispatch(method: string, params: Params): Promise<unknown> {
     default:
       throw wireError("UNKNOWN_METHOD" satisfies WireErrorCode, `not implemented: ${method}`);
   }
-}
-
-function supportsContentScript(url: string | undefined): boolean {
-  if (!url) return false;
-  return url.startsWith("http://") || url.startsWith("https://");
 }
 
 // ---------------------------------------------------------------------------

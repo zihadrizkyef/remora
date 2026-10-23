@@ -17,7 +17,7 @@ Remora memberi agent AI kendali besar atas browser user. Risiko utama:
 | Lapisan | Implementasi |
 |---|---|
 | Localhost saja | WS bind `127.0.0.1`, tidak pernah `0.0.0.0`. Tidak ada lalu lintas jaringan. |
-| Token acak 48-hex | Dibuat di popup (Regenerate), wajib sebagai query `?token=`. Koneksi tanpa token ditolak (4401). |
+| Token acak 48-hex | Dibuat di popup (Regenerate), dikirim lewat subprotocol WebSocket (`Sec-WebSocket-Protocol`), bukan URL — jadi tidak ikut tercatat di halaman Errors Chrome. Koneksi tanpa token ditolak (4401). |
 | JS eval default OFF | `evaluate_js` ditolak `NOT_ALLOWED` sampai user mengaktifkan toggle di popup. |
 | Network capture default OFF | Sama untuk `net_capture_*`. |
 | Kill-switch per-site | Origin yang diblokir menolak SEMUA aksi agent (`SITE_BLOCKED`). |
@@ -26,6 +26,7 @@ Remora memberi agent AI kendali besar atas browser user. Risiko utama:
 | Tidak ada debugger | Tanpa `chrome.debugger`/CDP — tidak ada attach senyap ke tab. |
 | Sanitizer pill | Isi ketikan tidak pernah tampil di pill ("mengetik di …" saja). |
 | Token tidak di-log | MCP maupun extension tidak pernah menulis token ke log/console. |
+| Channel kontrol peer | Proses MCP sesi lain attach ke hub lewat `/remora-control` di loopback dengan token yang sama; tanpa token ditolak (4401), dan hanya meneruskan request ke hub — tidak menambah jalur akses baru ke Chrome. |
 
 ## Batasan yang Disadari
 

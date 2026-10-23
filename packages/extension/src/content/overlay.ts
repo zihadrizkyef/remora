@@ -193,7 +193,7 @@ function applyFavicon(href: string): void {
   faviconLink = document.createElement("link");
   faviconLink.rel = "icon";
   faviconLink.href = href;
-  document.head.appendChild(faviconLink);
+  (document.head ?? document.documentElement).appendChild(faviconLink);
 }
 
 /** Badge teal polos bila favicon asli tak bisa digambar ulang. */

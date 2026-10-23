@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer } from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
+import { tokenProtocols } from "@remora/protocol";
 import { RemoraHub } from "../src/hub.js";
 
 const TOKEN = "test-token-0123456789abcdef";
@@ -52,7 +53,7 @@ describe("hub multi-session sharing", () => {
     await secondary.start();
 
     // Stand in for the Chrome extension.
-    const ext = new WebSocket(`ws://127.0.0.1:${port}/remora?token=${TOKEN}`);
+    const ext = new WebSocket(`ws://127.0.0.1:${port}/remora`, tokenProtocols(TOKEN));
     await new Promise((resolve, reject) => {
       ext.once("open", resolve);
       ext.once("error", reject);
@@ -96,10 +97,23 @@ describe("hub multi-session sharing", () => {
     const primary = track(new RemoraHub({ port, token: TOKEN }));
     await primary.start();
 
-    const bad = new WebSocket(`ws://127.0.0.1:${port}/remora-control?token=wrong`);
+    const bad = new WebSocket(`ws://127.0.0.1:${port}/remora-control`, tokenProtocols("wrong"));
     const code = await new Promise<number>((resolve) => {
       bad.on("close", (c) => resolve(c));
       bad.on("error", () => undefined);
+    });
+    expect(code).toBe(4401);
+  });
+
+  it("rejects a token passed in the URL query instead of the subprotocol", async () => {
+    const port = await freePort();
+    const primary = track(new RemoraHub({ port, token: TOKEN }));
+    await primary.start();
+
+    const legacy = new WebSocket(`ws://127.0.0.1:${port}/remora?token=${TOKEN}`);
+    const code = await new Promise<number>((resolve) => {
+      legacy.on("close", (c) => resolve(c));
+      legacy.on("error", () => undefined);
     });
     expect(code).toBe(4401);
   });

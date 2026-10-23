@@ -305,3 +305,12 @@ async function evaluateJs(params: P): Promise<{ value: unknown; type: string }> 
 }
 
 void getByRef;
+
+// Each page load gets a fresh content script; ask the background whether the
+// agent touched this tab moments ago so the pill survives agent navigation.
+void chrome.runtime
+  .sendMessage({ type: "remora:ready" })
+  .then((resp: { active?: boolean; action?: string; target?: string } | undefined) => {
+    if (resp?.active) showActivity(resp.action ?? "working", resp.target);
+  })
+  .catch(() => undefined);

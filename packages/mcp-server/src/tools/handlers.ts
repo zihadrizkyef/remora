@@ -86,7 +86,12 @@ function touched(ctx: Ctx, tabId: number | undefined, activity: string, target?:
  */
 async function guard(ctx: Ctx, tabId?: number): Promise<number | undefined> {
   try {
-    return await ctx.hub.guardTab(tabId);
+    const resolved = await ctx.hub.guardTab(tabId);
+    // Remember explicit targets as this session's working tab so later calls
+    // without tabId stay here instead of following another agent's focus.
+    const effective = tabId ?? resolved;
+    if (effective !== undefined) ctx.hub.setWorkingTab(effective);
+    return resolved;
   } catch (err) {
     throw toAgentError(err);
   }
@@ -113,6 +118,11 @@ function withClaims(ctx: Ctx, tabs: unknown): unknown {
 /** Resolve "active tab" early so activity is attributed even when tabId is omitted. */
 async function resolveTabId(ctx: Ctx, tabId?: number): Promise<number | undefined> {
   if (tabId !== undefined) return tabId;
+  // Prefer this session's own working tab over the window-active tab: without
+  // this, a session that never passes tabId always lands on whatever tab
+  // another agent focused last, then gets TAB_CLAIMED and makes a new tab.
+  const mine = ctx.hub.myWorkingTab();
+  if (mine !== undefined) return mine;
   try {
     const tabs = await ctx.hub.request<TabInfo[]>("tabs.list", {});
     return tabs.find((t) => t.active)?.id;
@@ -181,11 +191,12 @@ export async function tab_activate(ctx: Ctx, args: { tabId: number }): Promise<u
 
 export async function tab_create(ctx: Ctx, args: { url?: string; active?: boolean }): Promise<unknown> {
   const tab = await call<TabInfo>(ctx, "tabs.create", args);
-  // Own new tabs immediately so a second session never grabs them. Best
-  // effort: creation itself already succeeded.
+  // Own new tabs immediately so a second session never grabs them, and make
+  // it this session's working tab so later calls without tabId stay here.
   await ctx.hub.claimTab(tab.id).catch(() => undefined);
+  ctx.hub.setWorkingTab(tab.id);
   touched(ctx, tab.id, "opened tab", tab.url || tab.title);
-  return withClaims(ctx, [tab]);
+  return tab;
 }
 
 export async function tab_claim(ctx: Ctx, args: { tabId?: number; note?: string }): Promise<unknown> {
@@ -195,6 +206,7 @@ export async function tab_claim(ctx: Ctx, args: { tabId?: number; note?: string 
   }
   try {
     const claim = await ctx.hub.claimTab(id, args.note);
+    ctx.hub.setWorkingTab(id);
     touched(ctx, id, "claimed tab", args.note);
     return claim;
   } catch (err) {
@@ -219,7 +231,10 @@ export async function tab_close(ctx: Ctx, args: { tabId?: number }): Promise<unk
   await guard(ctx, args.tabId);
   const id = await resolveTabId(ctx, args.tabId);
   const r = await call(ctx, "tabs.close", { tabId: args.tabId });
-  if (id !== undefined) touched(ctx, id, "closed tab");
+  if (id !== undefined) {
+    touched(ctx, id, "closed tab");
+    ctx.hub.clearWorkingTab(id);
+  }
   return r;
 }
 
@@ -228,6 +243,7 @@ export async function tab_duplicate(ctx: Ctx, args: { tabId?: number }): Promise
   const tab = await call<TabInfo>(ctx, "tabs.duplicate", { tabId: args.tabId });
   // A duplicate is a fresh tab for this session — own it like tab_create.
   await ctx.hub.claimTab(tab.id).catch(() => undefined);
+  ctx.hub.setWorkingTab(tab.id);
   touched(ctx, tab.id, "duplicated tab", tab.title);
   return tab;
 }

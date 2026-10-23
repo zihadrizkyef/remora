@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   ExtensionHelloPayloadSchema,
@@ -8,13 +8,22 @@ import {
   WS_HEARTBEAT_MS,
   WS_PATH,
   WS_REQUEST_TIMEOUT_MS,
+  WS_SUBPROTOCOL,
   WireError,
   WireMethodName,
   parseWireFrame,
+  tokenFromProtocols,
+  tokenProtocols,
   validateMethodParams,
 } from "@remora/protocol";
 import { markActive, markClosed } from "./activity.js";
 import { ClaimStore, ClaimSnapshot, TabClaim } from "./claims.js";
+
+function sameToken(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
 
 /**
  * WebSocket hub: the MCP server listens on 127.0.0.1 and the Chrome
@@ -68,6 +77,14 @@ export class RemoraHub {
   readonly ownerLabel: string;
   private claims = new ClaimStore();
 
+  /**
+   * This session's working tab: set by tab_create/tab_duplicate/tab_claim
+   * (and any explicit-tabId mutation). Calls without tabId resolve here
+   * first instead of the window-active tab, so concurrent sessions stop
+   * stealing each other's focus and spawning tabs.
+   */
+  private workingTab: number | undefined;
+
   private mode: HubMode = "server";
   private control: WebSocket | null = null;
   private peers = new Set<WebSocket>();
@@ -114,6 +131,24 @@ export class RemoraHub {
     return this.claims.list();
   }
 
+  /** This session's working tab (may be undefined before first use). */
+  myWorkingTab(): number | undefined {
+    return this.workingTab;
+  }
+
+  setWorkingTab(tabId: number): void {
+    this.workingTab = tabId;
+  }
+
+  /** Forget the working tab, but only if it is the given one. */
+  clearWorkingTab(tabId: number): void {
+    this.forgetWorkingTab(tabId);
+  }
+
+  private forgetWorkingTab(tabId: number): void {
+    if (this.workingTab === tabId) this.workingTab = undefined;
+  }
+
   /** Drop claims for tabs that no longer exist; broadcast the trim. */
   pruneClaims(knownTabIds: Set<number> | number[]): number[] {
     if (this.mode !== "server") return [];
@@ -138,6 +173,15 @@ export class RemoraHub {
    * result when the resolution itself went wrong.
    */
   async guardTab(tabId?: number): Promise<number | undefined> {
+    // This session already has a working tab and the call is implicit: stay
+    // there. (Explicit tabId still goes through the claim check below.)
+    if (tabId === undefined && this.workingTab !== undefined) {
+      const verdict = this.mode === "peer"
+        ? await this.checkViaPrimary(this.workingTab)
+        : this.claims.check(this.workingTab, this.agentId);
+      if (!verdict.allowed) throw this.claimedError(verdict.claim);
+      return this.workingTab;
+    }
     // Peers ask the primary so the verdict is always authoritative — no
     // race with the claim broadcast.
     if (this.mode === "peer") return this.guardViaPrimary(tabId);
@@ -181,6 +225,30 @@ export class RemoraHub {
     } catch (err) {
       if ((err as WireError | undefined)?.code === "TAB_CLAIMED") throw err;
       return this.guardFromCache(tabId);
+    }
+  }
+
+  /**
+   * Check one explicit tab against the primary (peer fast-path for the
+   * working-tab shortcut). Falls back to the cached snapshot when the hub
+   * link is down; rethrows TAB_CLAIMED either way.
+   */
+  private async checkViaPrimary(
+    tabId: number,
+  ): Promise<{ allowed: true } | { allowed: false; claim: TabClaim }> {
+    try {
+      const verdict = await this.controlCall<{ allowed: boolean; claim?: TabClaim }>(
+        "guard",
+        { tabId },
+      );
+      if (!verdict.allowed && verdict.claim) return { allowed: false, claim: verdict.claim };
+      return { allowed: true };
+    } catch (err) {
+      if ((err as { code?: string; claim?: TabClaim }).code === "TAB_CLAIMED") {
+        const claim = (err as { claim?: TabClaim }).claim ?? this.claims.get(tabId);
+        if (claim) return { allowed: false, claim };
+      }
+      return this.claims.check(tabId, this.agentId);
     }
   }
 
@@ -263,7 +331,13 @@ export class RemoraHub {
   // -- server mode ----------------------------------------------------------
 
   private async startServer(): Promise<void> {
-    const wss = new WebSocketServer({ host: "127.0.0.1", port: this.opts.port });
+    const wss = new WebSocketServer({
+      host: "127.0.0.1",
+      port: this.opts.port,
+      // Browsers drop the connection unless the server echoes one offered
+      // protocol; answer with the plain name, never the token entry.
+      handleProtocols: (protocols) => (protocols.has(WS_SUBPROTOCOL) ? WS_SUBPROTOCOL : false),
+    });
     try {
       await new Promise<void>((resolve, reject) => {
         const onListening = () => {
@@ -284,19 +358,21 @@ export class RemoraHub {
 
     this.wss = wss;
     this.mode = "server";
-    wss.on("connection", (ws, req) => this.handleConnection(ws, req.url ?? ""));
+    wss.on("connection", (ws, req) =>
+      this.handleConnection(ws, req.url ?? "", tokenFromProtocols(req.headers["sec-websocket-protocol"])),
+    );
     wss.on("error", (err) => this.log(`server error: ${String(err)}`));
     this.heartbeat = setInterval(() => {
       if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-        this.socket.ping();
+        this.socket.send(JSON.stringify({ event: "heartbeat" }));
       }
     }, WS_HEARTBEAT_MS);
     this.heartbeat.unref?.();
   }
 
-  private handleConnection(ws: WebSocket, url: string): void {
+  private handleConnection(ws: WebSocket, url: string, token: string | null): void {
     const parsed = new URL(url, "http://localhost");
-    if (parsed.searchParams.get("token") !== this.opts.token) {
+    if (token === null || !sameToken(token, this.opts.token)) {
       this.log("rejected connection with bad token");
       ws.close(4401, "bad token");
       return;
@@ -470,7 +546,7 @@ export class RemoraHub {
   // -- peer mode ------------------------------------------------------------
 
   private controlUrl(): string {
-    return `ws://127.0.0.1:${this.opts.port}${CONTROL_PATH}?token=${encodeURIComponent(this.opts.token)}`;
+    return `ws://127.0.0.1:${this.opts.port}${CONTROL_PATH}`;
   }
 
   private async attach(): Promise<void> {
@@ -496,7 +572,7 @@ export class RemoraHub {
 
   private connectControl(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(this.controlUrl());
+      const ws = new WebSocket(this.controlUrl(), tokenProtocols(this.opts.token));
       let settled = false;
 
       // A foreign server may accept the TCP/WS connection on this port, so a
@@ -752,7 +828,9 @@ export class RemoraHub {
     this.broadcastToPeers({ event: "claims", payload: snapshot });
   }
 
-  private onTabClosed(tabId: number): void {    markClosed(tabId);
+  private onTabClosed(tabId: number): void {
+    markClosed(tabId);
+    this.forgetWorkingTab(tabId);
     if (this.mode === "server") {
       if (this.claims.get(tabId)) {
         this.claims.remove(tabId);

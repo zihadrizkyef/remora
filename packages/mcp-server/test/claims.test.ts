@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer } from "node:net";
 import { WebSocket } from "ws";
+import { tokenProtocols } from "@remora/protocol";
 import { RemoraHub } from "../src/hub.js";
 import { ClaimStore } from "../src/claims.js";
 import { tab_claim, tab_release, tabs_list, remora_status, navigate, click } from "../src/tools/handlers.js";
@@ -34,7 +35,7 @@ const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Fake extension answering a fixed tab list; records received methods. */
 async function fakeExtension(port: number, opts?: { activeId?: number; received?: string[] }) {
-  const ext = new WebSocket(`ws://127.0.0.1:${port}/remora?token=${TOKEN}`);
+  const ext = new WebSocket(`ws://127.0.0.1:${port}/remora`, tokenProtocols(TOKEN));
   await new Promise((resolve, reject) => {
     ext.once("open", resolve);
     ext.once("error", reject);
@@ -150,11 +151,40 @@ describe("tab claims across sessions", () => {
 
     const created = (await import("../src/tools/handlers.js").then((m) =>
       m.tab_create({ hub: h2 } as Ctx, { url: "https://new.test" }),
-    )) as Array<Record<string, unknown>>;
-    expect(created[0]?.claimedByMe).toBe(true);
+    )) as Record<string, unknown>;
+    expect(created.id).toBe(9);
+    // tab_create returns the raw tab (not an array), and sets working tab.
+    expect(h2.myWorkingTab()).toBe(9);
 
     const status = (await remora_status({ hub: h2 } as Ctx)) as { claims: Array<{ tabId: number }> };
     expect(status.claims.map((c) => c.tabId).sort()).toEqual([1, 9]);
+
+    ext.close();
+  });
+
+  it("sessions stick to their own working tab instead of spawning tabs", async () => {
+    const port = await freePort();
+    const h1 = track(new RemoraHub({ port, token: TOKEN, agentId: "aaa", ownerLabel: "ZCode aaa" }));
+    await h1.start();
+    const h2 = track(new RemoraHub({ port, token: TOKEN, agentId: "bbb", ownerLabel: "ZCode bbb" }));
+    await h2.start();
+    const received: string[] = [];
+    const ext = await fakeExtension(port, { received });
+    for (let i = 0; i < 40 && !h2.connected; i++) await delay(50);
+
+    await tab_claim({ hub: h1 }, { tabId: 1, note: "task A" });
+    await tab_claim({ hub: h2 }, { tabId: 2, note: "task B" });
+
+    // No tabId: each session resolves to its OWN working tab, not the
+    // window-active one — no TAB_CLAIMED, no reason to tab_create.
+    await navigate({ hub: h1 }, { url: "https://a.test/page" });
+    await navigate({ hub: h2 }, { url: "https://b.test/page" });
+    const navigates = received.filter((m) => m === "navigate");
+    expect(navigates.length).toBe(2);
+
+    // Explicit tabId use also sticks as the working tab.
+    await click({ hub: h1 }, { tabId: 1, ref: "e1" });
+    expect(h1.myWorkingTab()).toBe(1);
 
     ext.close();
   });
