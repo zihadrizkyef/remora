@@ -2,7 +2,9 @@
  * Content-script: agent-presence overlays.
  *
  * - Pill: floating status pill ("Remora · agent aktif" + last action),
- *   Shadow DOM isolated, pointer-events none, auto-fades after 8s idle.
+ *   Shadow DOM isolated, pointer-events none. Lit from the first tool call
+ *   until the task ends (task_end, idle watchdog, or session close); the
+ *   result (done / cut off) then shows for a few seconds and clears.
  * - Highlight: 1.2s amber outline + glow on the element being acted upon.
  * - Annotate: numbered badges over interactive elements for grounding.
  * - Title: `🟢 [Agent] ` prefix while the agent session is active.
@@ -18,11 +20,21 @@ const HIGHLIGHT = "#f59e0b";
 
 let pillHost: HTMLElement | null = null;
 let pillBox: HTMLElement | null = null;
-let pillAction: HTMLElement | null = null;
-let pillTarget: HTMLElement | null = null;
-let fadeTimer: ReturnType<typeof setTimeout> | null = null;
+let pillLine1: HTMLElement | null = null;
+let pillLine2: HTMLElement | null = null;
 let hideTimer: ReturnType<typeof setTimeout> | null = null;
+let tickTimer: ReturnType<typeof setInterval> | null = null;
 let originalTitle: string | null = null;
+
+export interface TaskInfo {
+  label?: string;
+  startedAt: number;
+  step: number;
+}
+export type TaskOutcome = "done" | "timeout" | "aborted";
+
+const DONE_SHOW_MS = 4000;
+const CUT_SHOW_MS = 6000;
 
 function ensurePill(): void {
   if (pillHost) return;
@@ -39,8 +51,14 @@ function ensurePill(): void {
       font: 500 11px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
       box-shadow: 0 2px 10px rgba(0,0,0,.4);
       opacity: 1; transition: opacity .5s ease; max-width: min(420px, 60vw); }
-    .pill.idle { opacity: .7; } .pill.hidden { opacity: 0; }
+    .pill.hidden { opacity: 0; }
     .pill.hidden .ring, .pill.hidden .ring2 { animation: none; }
+    .pill.done { background: rgba(6,40,28,.94); border-color: rgba(52,211,153,.7); color: #eafff4; }
+    .pill.cut { background: rgba(48,32,4,.94); border-color: rgba(251,191,36,.75); color: #fff6dc; }
+    .pill.done .dot { background: #34d399; box-shadow: none; animation: none; }
+    .pill.cut .dot { background: #fbbf24; box-shadow: none; animation: none; }
+    .pill.done .ring, .pill.done .ring2, .pill.cut .ring, .pill.cut .ring2 { display: none; }
+    .pill.done .act { color: #86efc0; } .pill.cut .act { color: #fcd34d; }
     .pill { overflow: visible; }
     .dotwrap { position: relative; width: 10px; height: 10px; flex: none; overflow: visible; }
     .dot { position: absolute; inset: 0; border-radius: 50%; background: #2dd4bf;
@@ -56,8 +74,10 @@ function ensurePill(): void {
     @keyframes radar {
       0% { transform: translate(-50%,-50%) scale(.02); opacity: .95; }
       100% { transform: translate(-50%,-50%) scale(1); opacity: 0; } }
-    .txt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .act { color: #7ff0e2; }
+    .txt { display: flex; flex-direction: column; min-width: 0; }
+    .l1 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .act { color: #7ff0e2; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
   `;
   pillBox = document.createElement("div");
   pillBox.className = "pill hidden";
@@ -72,36 +92,101 @@ function ensurePill(): void {
   dotwrap.append(dot, ring, ring2);
   const txt = document.createElement("span");
   txt.className = "txt";
-  const brand = document.createElement("strong");
-  brand.textContent = "Remora · agent aktif";
-  pillAction = document.createElement("span");
-  pillAction.className = "act";
-  pillTarget = document.createElement("span");
-  txt.append(brand, pillAction, pillTarget);
+  pillLine1 = document.createElement("span");
+  pillLine1.className = "l1";
+  pillLine2 = document.createElement("span");
+  pillLine2.className = "act";
+  txt.append(pillLine1, pillLine2);
   pillBox.append(dotwrap, txt);
   shadow.append(style, pillBox);
   document.documentElement.appendChild(pillHost);
 }
 
-/** Show/update the pill with the latest agent action; schedules fade. */
-export function showActivity(action: string, target?: string): void {
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const mm = String(Math.floor(s / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+function setLine1(strong: string, label?: string): void {
+  if (!pillLine1) return;
+  pillLine1.textContent = "";
+  const b = document.createElement("strong");
+  b.textContent = strong;
+  pillLine1.append(b);
+  if (label) pillLine1.append(` — ${label}`);
+}
+
+function stopTick(): void {
+  if (tickTimer) clearInterval(tickTimer);
+  tickTimer = null;
+}
+
+/**
+ * Render an in-progress task. The pill stays lit until `showTaskEnd`; without
+ * task info (legacy notification) it still shows, but is never silently faded.
+ */
+export function showActivity(action: string, target?: string, task?: TaskInfo): void {
   ensurePill();
   const pill = pillBox;
-  if (!pill || !pillAction || !pillTarget) return;
-  pillAction.textContent = action ? ` — ${action}` : "";
-  pillTarget.textContent = target ? ` · ${target.slice(0, 60)}` : "";
-  pill.classList.remove("hidden", "idle");
-  prefixTitle(true);
-  if (fadeTimer) clearTimeout(fadeTimer);
+  if (!pill || !pillLine2) return;
   if (hideTimer) clearTimeout(hideTimer);
-  fadeTimer = setTimeout(() => {
-    pill.classList.add("idle");
-    hideTimer = setTimeout(() => {
-      pill.classList.add("hidden");
-      prefixTitle(false);
-    }, 4000);
-  }, 8000);
+  hideTimer = null;
+  resultBase = null;
+  pill.classList.remove("hidden", "done", "cut");
+  setLine1("Remora · agent bekerja", task?.label);
+  const last = [action, target?.slice(0, 60)].filter(Boolean).join(" · ");
+  const render = () => {
+    const head = task ? `langkah ${task.step} · ${fmtElapsed(Date.now() - task.startedAt)} · ` : "";
+    if (pillLine2) pillLine2.textContent = head + last;
+  };
+  render();
+  stopTick();
+  if (task) tickTimer = setInterval(render, 1000);
+  prefixTitle(true);
 }
+
+/** Release the in-use markers at once; show the result briefly, then clear. */
+export function showTaskEnd(outcome: TaskOutcome, label: string | undefined, steps: number, durationMs: number): void {
+  ensurePill();
+  const pill = pillBox;
+  if (!pill || !pillLine2) return;
+  stopTick();
+  if (hideTimer) clearTimeout(hideTimer);
+  prefixTitle(false);
+  const done = outcome === "done";
+  pill.classList.remove("hidden", "done", "cut");
+  pill.classList.add(done ? "done" : "cut");
+  if (done) {
+    setLine1("Remora · selesai ✓", label);
+    pillLine2.textContent = `${steps} langkah · ${fmtElapsed(durationMs)}`;
+  } else {
+    setLine1(outcome === "aborted" ? "Remora · sesi agent ditutup" : "Remora · agent berhenti", outcome === "aborted" ? undefined : "tanpa sinyal selesai");
+    pillLine2.textContent = `${steps} langkah · ${fmtElapsed(durationMs)}`;
+  }
+  resultTitle(done ? "✅ " : "⚠️ ");
+  hideTimer = setTimeout(
+    () => {
+      pill.classList.add("hidden");
+      resultTitle(null);
+    },
+    done ? DONE_SHOW_MS : CUT_SHOW_MS,
+  );
+}
+
+/** Result marker on the title (✅/⚠️); null restores the page's own title. */
+function resultTitle(prefix: string | null): void {
+  if (prefix) {
+    const base = stripPrefix(document.title);
+    resultBase = base;
+    document.title = `${prefix}${base}`;
+  } else if (resultBase !== null) {
+    document.title = resultBase;
+    resultBase = null;
+  }
+}
+let resultBase: string | null = null;
 
 // ---------------------------------------------------------------------------
 // title prefix (with MutationObserver for SPA title churn)
@@ -139,7 +224,7 @@ function prefixTitle(on: boolean): void {
 
 function stripPrefix(title: string): string {
   // Toleransi prefix lama ("● ") agar migrasi mulus.
-  return title.replace(/^(🟢 \[Agent\] |● )/, "");
+  return title.replace(/^(🟢 \[Agent\] |✅ |⚠️ |● )/, "");
 }
 
 /** Tempel dot teal pada favicon tab; kembalikan aslinya saat sesi selesai. */

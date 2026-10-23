@@ -9,12 +9,15 @@
 
 import {
   DEFAULT_WS_PORT,
+  ShowActivityPayloadSchema as ActivityShowSchema,
+  TaskEndPayloadSchema,
   WS_PATH,
   WireErrorCode,
   tokenProtocols,
   parseWireFrame,
   validateMethodParams,
 } from "@remora/protocol";
+import type { TaskSnapshotPayload } from "@remora/protocol";
 import { isSiteBlocked, isWireError, loadSettings, saveSettings, wireError } from "./shared.js";
 
 // ---------------------------------------------------------------------------
@@ -118,8 +121,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     // `navigate`) gets the last activity back so the pill survives reloads.
     const tabId = _sender.tab?.id;
     const recent = tabId !== undefined ? recentActivity.get(tabId) : undefined;
-    if (recent && Date.now() - recent.ts < ACTIVITY_IDLE_MS) {
-      sendResponse({ active: true, action: recent.action, target: recent.target });
+    if (recent && (recent.task || Date.now() - recent.ts < ACTIVITY_IDLE_MS)) {
+      sendResponse({ active: true, action: recent.action, target: recent.target, task: recent.task });
     } else {
       sendResponse({ active: false });
     }
@@ -297,13 +300,35 @@ async function handleFrame(raw: string): Promise<void> {
 
 function handleNotification(notification: string, payload: unknown): void {
   if (notification === "activity.show") {
-    const p = payload as { tabId?: number; action?: string; target?: string };
-    if (typeof p?.tabId !== "number") return;
-    recentActivity.set(p.tabId, { action: p.action, target: p.target, ts: Date.now() });
-    void setTabBadge(p.tabId, p.action, p.target);
+    const parsed = ActivityShowSchema.safeParse(payload);
+    if (!parsed.success) return;
+    const p = parsed.data;
+    recentActivity.set(p.tabId, { action: p.action, target: p.target, ts: Date.now(), task: p.task });
+    void setTabBadge(p.tabId, p.action, p.target, !!p.task);
+    if (p.task && p.task.step <= 1) {
+      void appendActivityLog(p.tabId, "task start", p.task.label);
+    }
     void appendActivityLog(p.tabId, p.action ?? "working", p.target);
     void chrome.tabs
-      .sendMessage(p.tabId, { type: "remora:activity", action: p.action, target: p.target })
+      .sendMessage(p.tabId, { type: "remora:activity", action: p.action, target: p.target, task: p.task })
+      .catch(() => undefined);
+    return;
+  }
+  if (notification === "task.end") {
+    const parsed = TaskEndPayloadSchema.safeParse(payload);
+    if (!parsed.success) return;
+    const p = parsed.data;
+    recentActivity.delete(p.tabId);
+    void showResultBadge(p.tabId, p.outcome);
+    void appendActivityLog(p.tabId, `task ${p.outcome}`, `${p.steps} langkah`);
+    void chrome.tabs
+      .sendMessage(p.tabId, {
+        type: "remora:task_end",
+        outcome: p.outcome,
+        label: p.label,
+        steps: p.steps,
+        durationMs: p.durationMs,
+      })
       .catch(() => undefined);
   }
 }
@@ -331,9 +356,15 @@ async function appendActivityLog(tabId: number, action: string, target?: string)
 
 const ACTIVITY_IDLE_MS = 8000;
 const badgeTimers = new Map<number, ReturnType<typeof setTimeout>>();
-const recentActivity = new Map<number, { action?: string; target?: string; ts: number }>();
+const recentActivity = new Map<number, { action?: string; target?: string; ts: number; task?: TaskSnapshotPayload }>();
 
-async function setTabBadge(tabId: number, action?: string, target?: string): Promise<void> {
+const RESULT_BADGE_MS = { done: 4000, timeout: 6000, aborted: 6000 } as const;
+
+/** With a task the badge stays until `task.end`; without one it falls back to idle expiry. */
+async function setTabBadge(tabId: number, action?: string, target?: string, persistent = false): Promise<void> {
+  const prev = badgeTimers.get(tabId);
+  if (prev) clearTimeout(prev);
+  badgeTimers.delete(tabId);
   try {
     await chrome.action.setBadgeText({ tabId, text: "AI" });
     await chrome.action.setBadgeBackgroundColor({ tabId, color: "#dc2626" });
@@ -342,14 +373,37 @@ async function setTabBadge(tabId: number, action?: string, target?: string): Pro
   } catch {
     return;
   }
-  const prev = badgeTimers.get(tabId);
-  if (prev) clearTimeout(prev);
+  if (persistent) return;
   badgeTimers.set(
     tabId,
     setTimeout(() => {
       badgeTimers.delete(tabId);
       clearTabBadge(tabId).catch(() => undefined);
     }, ACTIVITY_IDLE_MS),
+  );
+}
+
+/** Task over: swap "AI" for the result mark, then clear it. */
+async function showResultBadge(tabId: number, outcome: keyof typeof RESULT_BADGE_MS): Promise<void> {
+  const prev = badgeTimers.get(tabId);
+  if (prev) clearTimeout(prev);
+  try {
+    const done = outcome === "done";
+    await chrome.action.setBadgeText({ tabId, text: done ? "OK" : "!" });
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: done ? "#059669" : "#b45309" });
+    await chrome.action.setTitle({
+      tabId,
+      title: done ? "Remora: tugas agent selesai" : "Remora: agent berhenti tanpa sinyal selesai",
+    });
+  } catch {
+    return;
+  }
+  badgeTimers.set(
+    tabId,
+    setTimeout(() => {
+      badgeTimers.delete(tabId);
+      clearTabBadge(tabId).catch(() => undefined);
+    }, RESULT_BADGE_MS[outcome]),
   );
 }
 

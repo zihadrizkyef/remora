@@ -440,6 +440,24 @@ export const AgentActivityPayloadSchema = z.object({
 });
 export type AgentActivityPayload = z.infer<typeof AgentActivityPayloadSchema>;
 
+/** Task context carried by `activity.show` while a task is running. */
+export const TaskSnapshotSchema = z.object({
+  label: z.string().optional(),
+  startedAt: z.number().int(),
+  step: z.number().int().nonnegative(),
+});
+export type TaskSnapshotPayload = z.infer<typeof TaskSnapshotSchema>;
+
+/** `task.end` notification (MCP -> extension): releases a tab's indicators. */
+export const TaskEndPayloadSchema = z.object({
+  tabId: z.number().int(),
+  outcome: z.enum(["done", "timeout", "aborted"]),
+  label: z.string().optional(),
+  steps: z.number().int().nonnegative(),
+  durationMs: z.number().int().nonnegative(),
+});
+export type TaskEndPayload = z.infer<typeof TaskEndPayloadSchema>;
+
 export const TabClosedPayloadSchema = z.object({ tabId: z.number().int() });
 export const NavigatedPayloadSchema = z.object({
   tabId: z.number().int(),
@@ -459,9 +477,10 @@ export const UploadProgressPayloadSchema = z.object({
 
 export const ShowActivityPayloadSchema = z.object({
   tabId: z.number().int(),
-  action: z.string(),
+  action: z.string().optional(),
   /** Human-safe target label; MUST NOT contain typed text. */
   target: z.string().optional(),
+  task: TaskSnapshotSchema.optional(),
 });
 export type ShowActivityPayload = z.infer<typeof ShowActivityPayloadSchema>;
 

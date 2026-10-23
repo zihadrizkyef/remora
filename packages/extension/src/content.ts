@@ -38,7 +38,8 @@ import {
   uploadDrop,
   uploadInject,
 } from "./content/uploads.js";
-import { hideAnnotate, showActivity, showAnnotate } from "./content/overlay.js";
+import { hideAnnotate, showActivity, showAnnotate, showTaskEnd } from "./content/overlay.js";
+import type { TaskInfo, TaskOutcome } from "./content/overlay.js";
 import { installCapture, readConsole, readErrors } from "./content/capture.js";
 
 installCapture();
@@ -49,9 +50,24 @@ const num = (v: unknown) => (typeof v === "number" ? v : undefined);
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return false;
-  const m = msg as { type?: string; method?: string; params?: P; action?: string; target?: string };
+  const m = msg as {
+    type?: string;
+    method?: string;
+    params?: P;
+    action?: string;
+    target?: string;
+    task?: TaskInfo;
+    outcome?: TaskOutcome;
+    label?: string;
+    steps?: number;
+    durationMs?: number;
+  };
   if (m.type === "remora:activity") {
-    showActivity(m.action ?? "working", m.target);
+    showActivity(m.action ?? "working", m.target, m.task);
+    return false;
+  }
+  if (m.type === "remora:task_end") {
+    showTaskEnd(m.outcome ?? "done", m.label, m.steps ?? 0, m.durationMs ?? 0);
     return false;
   }
   if (m.type !== "remora:call" || !m.method) return false;
@@ -310,7 +326,7 @@ void getByRef;
 // agent touched this tab moments ago so the pill survives agent navigation.
 void chrome.runtime
   .sendMessage({ type: "remora:ready" })
-  .then((resp: { active?: boolean; action?: string; target?: string } | undefined) => {
-    if (resp?.active) showActivity(resp.action ?? "working", resp.target);
+  .then((resp: { active?: boolean; action?: string; target?: string; task?: TaskInfo } | undefined) => {
+    if (resp?.active) showActivity(resp.action ?? "working", resp.target, resp.task);
   })
   .catch(() => undefined);

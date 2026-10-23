@@ -4,6 +4,8 @@ import {
   ExtensionHelloPayloadSchema,
   NavigatedPayloadSchema,
   TabClosedPayloadSchema,
+  TaskEndPayloadSchema,
+  TaskSnapshotSchema,
   UploadProgressPayloadSchema,
   WS_HEARTBEAT_MS,
   WS_PATH,
@@ -17,6 +19,7 @@ import {
   validateMethodParams,
 } from "@remora/protocol";
 import { markActive, markClosed } from "./activity.js";
+import { TaskTracker, type TaskEnded, type TaskSnapshot } from "./tasks.js";
 import { ClaimStore, ClaimSnapshot, TabClaim } from "./claims.js";
 
 function sameToken(a: string, b: string): boolean {
@@ -76,6 +79,7 @@ export class RemoraHub {
   /** Short human label shown to other agents on claimed tabs. */
   readonly ownerLabel: string;
   private claims = new ClaimStore();
+  readonly tasks = new TaskTracker((ended) => this.emitTaskEnd(ended));
 
   /**
    * This session's working tab: set by tab_create/tab_duplicate/tab_claim
@@ -285,6 +289,8 @@ export class RemoraHub {
   }
 
   async stop(): Promise<void> {
+    // Before teardown, so the notification can still reach the extension.
+    this.tasks.end("aborted");
     this.stopped = true;
     if (this.reattachTimer) clearTimeout(this.reattachTimer);
     this.reattachTimer = null;
@@ -509,10 +515,20 @@ export class RemoraHub {
         return;
       }
       if (frame.kind === "notification" && frame.value.notification === "activity.show") {
-        const p = frame.value.payload as { tabId?: unknown; action?: unknown; target?: unknown };
+        const p = frame.value.payload as { tabId?: unknown; action?: unknown; target?: unknown; task?: unknown };
         if (typeof p?.tabId === "number" && typeof p.action === "string") {
-          this.showActivity(p.tabId, p.action, typeof p.target === "string" ? p.target : undefined);
+          const parsed = TaskSnapshotSchema.safeParse(p.task);
+          this.showActivity(
+            p.tabId,
+            p.action,
+            typeof p.target === "string" ? p.target : undefined,
+            parsed.success ? parsed.data : undefined,
+          );
         }
+      }
+      if (frame.kind === "notification" && frame.value.notification === "task.end") {
+        const parsed = TaskEndPayloadSchema.safeParse(frame.value.payload);
+        if (parsed.success) this.notify("task.end", parsed.data);
       }
     });
     ws.on("close", () => {
@@ -928,8 +944,27 @@ export class RemoraHub {
   }
 
   /** Tell the extension to render activity on a tab (pill + badge + title). */
-  showActivity(tabId: number, action: string, target?: string): void {
+  showActivity(tabId: number, action: string, target?: string, task?: TaskSnapshot): void {
     markActive(tabId, action, target);
-    this.notify("activity.show", { tabId, action, target });
+    this.notify("activity.show", { tabId, action, target, task });
+  }
+
+  /** This session's own tool call: counts as a task step, then renders. */
+  touch(tabId: number, action: string, target?: string): void {
+    this.showActivity(tabId, action, target, this.tasks.touch(tabId));
+  }
+
+  /** Release the indicators on every tab the finished task touched. */
+  private emitTaskEnd(ended: TaskEnded): void {
+    for (const tabId of ended.tabIds) {
+      markClosed(tabId);
+      this.notify("task.end", {
+        tabId,
+        outcome: ended.outcome,
+        label: ended.label,
+        steps: ended.steps,
+        durationMs: ended.durationMs,
+      });
+    }
   }
 }

@@ -1,6 +1,6 @@
 # Katalog MCP Tools Remora
 
-56 tools. Semua argumen `tabId` opsional (default: tab aktif). Semua target
+58 tools. Semua argumen `tabId` opsional (default: tab aktif). Semua target
 elemen memakai `ref` (dari `snapshot`, disarankan) atau `selector` (CSS,
 fallback). Setiap tool yang menyentuh tab memicu indikator agent aktif
 (pill + badge + prefix judul).
@@ -29,6 +29,8 @@ gambar + metadata ringkas.
 | Tool | Deskripsi |
 |---|---|
 | `remora_status` | Status bridge: extension terhubung?, versi, jumlah tab, tab aktif agent. |
+| `task_begin` | Umumkan tugas mulai (`label?`, maks 60 karakter). Indikator menyala sampai `task_end`. |
+| `task_end` | Umumkan tugas selesai. Panggil sebelum jawaban akhir; tanpa ini indikator baru padam setelah 90 detik dan tampil sebagai "berhenti tanpa sinyal selesai". |
 
 ## Tab & Window
 

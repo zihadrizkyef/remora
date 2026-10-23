@@ -118,7 +118,9 @@ Jalankan berurutan, semua harus lolos:
 - [ ] `tabs_list` / `tab_create` / `navigate` / `go_back` / `reload`.
 - [ ] `snapshot` → klik/ketik via ref → **pill muncul** + badge + `● ` di
       title + highlight pulse 600ms di target.
-- [ ] Idle 8 detik → pill fade, title kembali normal.
+- [ ] Pill tetap menyala selama tugas (tanpa fade) → `task_end` → pill hijau
+      "selesai ✓" ±4 detik, title kembali normal. Tanpa `task_end`: 90 detik
+      → pill amber "agent berhenti tanpa sinyal selesai".
 - [ ] `screenshot_annotated` → badge bernomor cocok dengan refs snapshot.
 - [ ] `clipboard_write` → `clipboard_paste_to` ke kolom teks.
 - [ ] Upload: `upload_file` ke input file (tanpa dialog Explorer!),

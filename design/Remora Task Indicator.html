@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Remora · Mockup Indikator Siklus Tugas</title>
+<style>
+  /* ============ ARTIFACT DESIGN SYSTEM ============
+     Surface: Operate. Pengguna mengamati tab yang sedang dioperasikan agent,
+     jadi yang dominan adalah status tegas (mulai / berjalan / selesai / putus),
+     bukan dekorasi. Tanpa hero, tanpa grid kartu, tanpa ikon-topper, tanpa rel-kiri.
+     Palet: konsol gelap netral + satu aksen teal (sama dengan Remora Popup.html).
+     Semafor hanya untuk hasil: hijau = selesai, amber = putus. Tipe: system-ui,
+     mono hanya untuk waktu/log.
+  ================================================ */
+  :root{
+    --canvas:#eceef1; --canvas-ink:#23262d; --canvas-muted:#6b7280;
+    --pop-bg:#17191f; --pop-panel:#1f222b; --pop-ink:#e9ebf0; --pop-muted:#9aa0ad;
+    --pop-faint:#6e7482; --pop-border:#2f3442;
+    --accent:#2dd4bf; --ok:#34d399; --warn:#fbbf24; --bad:#dc2626;
+    --pill-bg:rgba(4,33,30,.9);
+    --mono:ui-monospace,"Cascadia Mono",Consolas,Menlo,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--canvas);color:var(--canvas-ink);font:14px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
+  .page{max-width:980px;margin:0 auto;padding:28px 20px 72px}
+  .kicker{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--canvas-muted);margin:0 0 4px}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{margin:0 0 16px;color:var(--canvas-muted);font-size:13px;max-width:70ch}
+  h2.sec{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--canvas-muted);margin:28px 0 10px}
+
+  .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px}
+  .seg{display:flex;background:#dde0e6;border-radius:8px;padding:3px;gap:2px}
+  .seg button,.play{border:0;background:transparent;padding:7px 14px;border-radius:6px;cursor:pointer;font:600 13px var(--sans);color:#4b5563;min-height:36px}
+  .seg button[aria-pressed="true"]{background:#fff;color:#111;box-shadow:0 1px 2px rgba(0,0,0,.15)}
+  .play{background:#0d9488;color:#fff}
+  button:focus-visible{outline:2px solid #0d9488;outline-offset:2px}
+
+  /* ---------- browser frame ---------- */
+  .browser{background:#fff;border-radius:12px;overflow:hidden;border:1px solid #c9ced6;box-shadow:0 12px 32px rgba(20,24,32,.18)}
+  .tabstrip{display:flex;align-items:flex-end;gap:2px;background:#dee1e6;padding:8px 8px 0}
+  .tab{display:flex;align-items:center;gap:7px;max-width:240px;min-width:0;padding:8px 12px;border-radius:8px 8px 0 0;background:#d0d4db;font-size:12px;color:#444}
+  .tab.on{background:#fff;color:#111}
+  .tab .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .fav{position:relative;width:16px;height:16px;border-radius:4px;background:#ee4d2d;flex:none}
+  .fav i{position:absolute;right:-3px;bottom:-3px;width:9px;height:9px;border-radius:50%;background:#0d9488;border:1.5px solid #fff;display:none}
+  .toolbar{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #e3e5e9;background:#fff}
+  .url{flex:1;background:#f1f3f4;border-radius:999px;padding:6px 14px;font-size:12px;color:#555;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ext{position:relative;width:28px;height:28px;border-radius:6px;background:#0d2b28;display:flex;align-items:center;justify-content:center;flex:none}
+  .ext svg{display:block}
+  .badge{position:absolute;right:-6px;bottom:-5px;min-width:18px;padding:1px 4px;border-radius:4px;color:#fff;font:700 9px/14px var(--sans);text-align:center;display:none}
+  .viewport{position:relative;height:300px;background:#faf7f5;overflow:hidden}
+  .sk{position:absolute;background:#ece7e3;border-radius:6px}
+
+  /* ---------- pill ---------- */
+  .pill{position:absolute;right:14px;top:14px;display:none;align-items:center;gap:9px;background:var(--pill-bg);color:#eafffb;
+    border:1px solid rgba(13,148,136,.55);border-radius:999px;padding:6px 14px 6px 10px;font:500 11px/1.4 var(--sans);
+    box-shadow:0 2px 10px rgba(0,0,0,.35);max-width:min(430px,86%);overflow:visible;transition:background .2s,border-color .2s}
+  .pill .txt{display:flex;flex-direction:column;min-width:0}
+  .pill .l1{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pill .l2{font-size:10.5px;color:#7ff0e2;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .dw{position:relative;width:10px;height:10px;flex:none}
+  .dw .d{position:absolute;inset:0;border-radius:50%;background:#2dd4bf;box-shadow:0 0 6px rgba(45,212,191,.9)}
+  .dw .r{position:absolute;left:50%;top:50%;width:150px;height:150px;border:2.5px solid rgba(45,212,191,.85);border-radius:50%;
+    background:rgba(45,212,191,.06);transform:translate(-50%,-50%) scale(.02);opacity:0;pointer-events:none;animation:radar 1s ease-out infinite}
+  .dw .r.b{animation-delay:.5s}
+  @keyframes radar{0%{transform:translate(-50%,-50%) scale(.02);opacity:.95}100%{transform:translate(-50%,-50%) scale(1);opacity:0}}
+  .dw .d{animation:pulse 1s ease-in-out infinite}
+  @keyframes pulse{50%{box-shadow:0 0 11px rgba(45,212,191,1)}}
+  /* aktif */
+  [data-s="active"] .pill{display:flex}
+  [data-s="active"] .badge{display:block;background:var(--bad)}
+  [data-s="active"] .fav i{display:block}
+  /* selesai: hanya hasil, tanpa radar */
+  [data-s="done"] .pill{display:flex;background:rgba(6,40,28,.94);border-color:rgba(52,211,153,.7);color:#eafff4}
+  [data-s="done"] .pill .l2{color:#86efc0}
+  [data-s="done"] .dw .d{background:var(--ok);box-shadow:none;animation:none}
+  [data-s="done"] .dw .r{display:none}
+  [data-s="done"] .badge{display:block;background:#059669}
+  /* putus */
+  [data-s="timeout"] .pill{display:flex;background:rgba(48,32,4,.94);border-color:rgba(251,191,36,.75);color:#fff6dc}
+  [data-s="timeout"] .pill .l2{color:#fcd34d}
+  [data-s="timeout"] .dw .d{background:var(--warn);box-shadow:none;animation:none}
+  [data-s="timeout"] .dw .r{display:none}
+  [data-s="timeout"] .badge{display:block;background:#b45309}
+  @media (prefers-reduced-motion:reduce){.dw .r,.dw .d{animation:none}}
+
+  /* ---------- matriks state + popup log ---------- */
+  .grid{display:grid;grid-template-columns:1.2fr 1fr;gap:18px;align-items:start}
+  @media (max-width:760px){.grid{grid-template-columns:1fr}}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;border-radius:10px;overflow:hidden;border:1px solid #d5d9e0}
+  th,td{padding:8px 10px;text-align:left;border-bottom:1px solid #e6e8ec;vertical-align:top}
+  th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--canvas-muted);background:#f6f7f9}
+  tr:last-child td{border-bottom:0}
+  td code{font-family:var(--mono);font-size:11.5px}
+  tr.cur td{background:#e7f6f3}
+  .popup{background:var(--pop-bg);color:var(--pop-ink);border-radius:12px;border:1px solid #101218;overflow:hidden;font-size:12.5px}
+  .popup h3{margin:0;padding:10px 14px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--pop-faint);background:var(--pop-panel);border-bottom:1px solid var(--pop-border)}
+  .log{list-style:none;margin:0;padding:6px 0}
+  .log li{display:grid;grid-template-columns:52px 1fr;gap:8px;padding:6px 14px;font-family:var(--mono);font-size:11.5px;color:var(--pop-muted)}
+  .log li b{color:var(--pop-ink);font-weight:600}
+  .log li.start,.log li.end,.log li.cut{font-family:var(--sans);font-size:12px;padding-top:8px;padding-bottom:8px;border-top:1px solid var(--pop-border);border-bottom:1px solid var(--pop-border);background:#1b1e26;color:var(--pop-ink)}
+  .log li.start b{color:var(--accent)} .log li.end b{color:var(--ok)} .log li.cut b{color:var(--warn)}
+  .log li.hidden{display:none}
+
+  .diag{background:#fff;border:1px solid #d5d9e0;border-radius:10px;padding:14px 16px;font-size:13px}
+  .diag b.score{font-size:15px}
+  .diag ul{margin:8px 0 0;padding-left:18px;color:#4b5563}
+</style>
+</head>
+<body>
+<div class="page" id="root" data-s="idle">
+  <p class="kicker">Remora · Indikator Agent</p>
+  <h1>Siklus tugas: mulai → berjalan → selesai / putus</h1>
+  <p class="sub">Indikator tidak lagi memudar sendiri setelah 8 detik. Pill, badge, prefix judul, dan titik favicon <b>menyala sejak tool pertama</b> dan <b>hanya padam saat agent mengirim <code>task_end</code></b>. Kalau agent tidak pernah mengirimnya, pill berubah amber dengan tulisan jelas, tidak diam-diam hilang. Semuanya non-interaktif.</p>
+
+  <div class="controls">
+    <div class="seg" role="group" aria-label="State indikator" id="seg">
+      <button data-go="idle" aria-pressed="true">Tidak ada tugas</button>
+      <button data-go="active" aria-pressed="false">Berjalan</button>
+      <button data-go="done" aria-pressed="false">Selesai</button>
+      <button data-go="timeout" aria-pressed="false">Putus</button>
+    </div>
+    <button class="play" id="play">▶ Putar skenario</button>
+  </div>
+
+  <div class="browser">
+    <div class="tabstrip">
+      <div class="tab on"><span class="fav" id="fav"><i></i></span><span class="t" id="tabtitle">Shopee Indonesia | Belanja Online</span></div>
+      <div class="tab"><span class="fav" style="background:#4285f4"></span><span class="t">Dokumen tanpa judul</span></div>
+    </div>
+    <div class="toolbar">
+      <div class="url">shopee.co.id/search?keyword=headset%20gaming&amp;maxPrice=300000</div>
+      <div class="ext" title="Remora">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M2 9c3-5 11-5 14 0-3 5-11 5-14 0z" stroke="#2dd4bf" stroke-width="1.6"/><circle cx="9" cy="9" r="2" fill="#2dd4bf"/></svg>
+        <span class="badge" id="badge">AI</span>
+      </div>
+    </div>
+    <div class="viewport">
+      <div class="sk" style="left:20px;top:20px;width:220px;height:18px"></div>
+      <div class="sk" style="left:20px;top:56px;width:150px;height:110px"></div>
+      <div class="sk" style="left:184px;top:56px;width:150px;height:110px"></div>
+      <div class="sk" style="left:348px;top:56px;width:150px;height:110px"></div>
+      <div class="sk" style="left:20px;top:180px;width:478px;height:12px"></div>
+      <div class="sk" style="left:20px;top:202px;width:360px;height:12px"></div>
+      <div class="pill" id="pill" role="status" aria-live="polite">
+        <span class="dw"><span class="d"></span><span class="r"></span><span class="r b"></span></span>
+        <span class="txt"><span class="l1" id="l1"></span><span class="l2" id="l2"></span></span>
+      </div>
+    </div>
+  </div>
+
+  <h2 class="sec">Perilaku per state</h2>
+  <div class="grid">
+    <table id="matrix">
+      <thead><tr><th>State</th><th>Pill</th><th>Judul tab</th><th>Badge</th></tr></thead>
+      <tbody>
+        <tr data-row="idle"><td>Tidak ada tugas</td><td>tidak ada</td><td>asli</td><td>kosong</td></tr>
+        <tr data-row="active"><td>Berjalan</td><td>teal, tetap, radar, langkah + waktu</td><td><code>🟢 [Agent]</code></td><td>“AI” merah</td></tr>
+        <tr data-row="done"><td>Selesai ±4 dtk</td><td>hijau, hasil, tanpa radar</td><td><code>✅</code> lalu asli</td><td>“OK” hijau lalu kosong</td></tr>
+        <tr data-row="timeout"><td>Putus ±6 dtk</td><td>amber, “berhenti tanpa sinyal selesai”</td><td><code>⚠️</code> lalu asli</td><td>“!” amber lalu kosong</td></tr>
+      </tbody>
+    </table>
+    <div class="popup">
+      <h3>Log aktivitas</h3>
+      <ul class="log" id="log"></ul>
+    </div>
+  </div>
+  <p class="sub" style="margin-top:10px">Titik favicon dan prefix <code>🟢</code> dilepas seketika saat tugas berakhir (tab tidak lagi dipakai agent). Hanya penanda hasil (✅ / ⚠️ / badge) yang bertahan sebentar bersama pill. Putus terjadi bila tidak ada tool selama 90 detik, server MCP tertutup, atau tab ditutup.</p>
+
+  <h2 class="sec">Slop Diagnostic</h2>
+  <div class="diag">
+    <b class="score">Skor 0 / 10</b> setelah audit mandiri. Surface: <b>Operate</b>.
+    <ul>
+      <li>Tell 1–2 (gradien/hue generik): tidak ada; satu aksen teal dari mockup popup, semafor hanya untuk hasil.</li>
+      <li>Tell 3, 7, 8 (grid tile, ikon-topper, center stack): tidak ada; satu kanvas browser, tabel perilaku rata-kiri.</li>
+      <li>Tell 4–6 (rel-kiri, blur, angka monumen): tidak ada; angka hanya waktu dan jumlah langkah yang memang dibutuhkan.</li>
+      <li>Tell 9 (tipe default): stack system-ui disengaja karena native untuk popup MV3; mono hanya untuk waktu dan log.</li>
+      <li>Tell 10 (surface salah): pill dan badge adalah pusat komposisi, bukan hero.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+(function(){
+  var root=document.getElementById('root'), l1=document.getElementById('l1'), l2=document.getElementById('l2');
+  var badge=document.getElementById('badge'), title=document.getElementById('tabtitle'), log=document.getElementById('log');
+  var base='Shopee Indonesia | Belanja Online', t0=0, tick=null, timers=[];
+  var seg=document.getElementById('seg');
+
+  function clearTimers(){timers.forEach(clearTimeout);timers=[];clearInterval(tick);tick=null}
+  function fmt(s){var m=Math.floor(s/60),x=s%60;return (m<10?'0':'')+m+':'+(x<10?'0':'')+x}
+  function setLog(rows){log.innerHTML=rows.map(function(r){return '<li class="'+(r[0]||'')+'"><span>'+r[1]+'</span><span>'+r[2]+'</span></li>'}).join('')}
+
+  function apply(s){
+    root.dataset.s=s;
+    [].forEach.call(seg.children,function(b){b.setAttribute('aria-pressed',b.dataset.go===s)});
+    [].forEach.call(document.querySelectorAll('#matrix tr[data-row]'),function(r){r.className=r.dataset.row===s?'cur':''});
+    if(s==='idle'){title.textContent=base;badge.textContent='AI';setLog([['', '—', 'Belum ada tugas dalam sesi ini']])}
+    if(s==='active'){
+      title.textContent='🟢 [Agent] '+base;badge.textContent='AI';
+      l1.innerHTML='<strong>Remora · agent bekerja</strong> — Cari headset termurah';
+      var n=3,el=12;l2.textContent='langkah '+n+' · '+fmt(el)+' · click · Produk #2';
+      tick=setInterval(function(){el++;if(el%4===0)n++;l2.textContent='langkah '+n+' · '+fmt(el)+' · click · Produk #'+Math.min(n,5)},1000);
+      setLog([['start','00:00','<b>Mulai</b> · Cari headset termurah'],['','00:03','navigate · shopee.co.id'],['','00:09','type · kolom pencarian'],['','00:12','click · Produk #2']]);
+    }
+    if(s==='done'){
+      title.textContent='✅ '+base;badge.textContent='OK';
+      l1.innerHTML='<strong>Remora · selesai ✓</strong> — Cari headset termurah';l2.textContent='5 langkah · 00:41';
+      setLog([['','00:38','click · Produk #5'],['end','00:41','<b>Selesai</b> · 5 langkah · 00:41']]);
+    }
+    if(s==='timeout'){
+      title.textContent='⚠️ '+base;badge.textContent='!';
+      l1.innerHTML='<strong>Remora · agent berhenti</strong> tanpa sinyal selesai';l2.textContent='terakhir: click · Produk #3 · 90 dtk lalu';
+      setLog([['','00:22','click · Produk #3'],['cut','01:52','<b>Putus</b> · tidak ada sinyal selesai selama 90 dtk']]);
+    }
+  }
+  function go(s){clearTimers();apply(s)}
+  seg.addEventListener('click',function(e){var b=e.target.closest('button');if(b)go(b.dataset.go)});
+  document.getElementById('play').addEventListener('click',function(){
+    clearTimers();apply('active');
+    timers.push(setTimeout(function(){clearInterval(tick);apply('done')},7000));
+    timers.push(setTimeout(function(){apply('idle')},11000));
+  });
+  apply('idle');
+})();
+</script>
+</body>
+</html>

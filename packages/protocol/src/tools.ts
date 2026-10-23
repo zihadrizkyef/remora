@@ -32,6 +32,11 @@ export const TOOL_DEFS: ToolDef[] = [
   // -- connection -------------------------------------------------------------
   def("remora_status", "Remora bridge status: extension connected, versions, tab count, tabs currently showing agent activity.", "status check", {}),
 
+  def("task_begin", "Announce the start of a task. Remora keeps its on-screen 'agent active' indicators lit until you call task_end. Call this first, with a short label such as 'Cari headset termurah'.", "starting task", {
+    label: z.string().describe("Short task name shown to the user (max 60 chars)").optional(),
+  }),
+  def("task_end", "Announce that your task is finished, successfully or not. ALWAYS call this when you are done using the browser, before your final answer; otherwise the indicators stay lit until a 90s idle timeout and show the agent as cut off.", "finishing task", {}),
+
   // -- tabs & windows -----------------------------------------------------------
   def("tabs_list", "List all open tabs across windows (id, title, url, active, pinned).", "listing tabs", {}),
   def("tab_activate", "Activate (focus) a tab by id.", "activating tab", { tabId: z.number().int().describe("Tab id to activate") }),

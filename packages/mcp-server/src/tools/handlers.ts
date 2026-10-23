@@ -74,7 +74,7 @@ async function call<T>(
 
 function touched(ctx: Ctx, tabId: number | undefined, activity: string, target?: string): void {
   if (tabId === undefined) return;
-  ctx.hub.showActivity(tabId, activity, target);
+  ctx.hub.touch(tabId, activity, target);
 }
 
 /**
@@ -163,6 +163,19 @@ export async function remora_status(ctx: Ctx): Promise<unknown> {
     claims: ctx.hub.listClaims(),
     agentId: ctx.hub.agentId,
   };
+}
+
+// -- task lifecycle -------------------------------------------------------------
+
+export async function task_begin(ctx: Ctx, args: { label?: string }): Promise<unknown> {
+  const task = ctx.hub.tasks.begin(args.label);
+  return { started: true, label: task.label ?? null, hint: "Call task_end when you are done." };
+}
+
+export async function task_end(ctx: Ctx): Promise<unknown> {
+  const ended = ctx.hub.tasks.end("done");
+  if (!ended) return { ended: false, note: "no task was running" };
+  return { ended: true, label: ended.label ?? null, steps: ended.steps, durationMs: ended.durationMs };
 }
 
 // -- tabs & windows -------------------------------------------------------------

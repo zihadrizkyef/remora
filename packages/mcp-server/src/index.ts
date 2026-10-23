@@ -18,6 +18,8 @@ import type { Ctx } from "./tools/handlers.js";
 
 const HANDLERS: Record<string, (ctx: Ctx, args: never) => Promise<unknown>> = {
   remora_status: (ctx) => H.remora_status(ctx),
+  task_begin: (ctx, a) => H.task_begin(ctx, a),
+  task_end: (ctx) => H.task_end(ctx),
   tabs_list: (ctx) => H.tabs_list(ctx),
   tab_activate: (ctx, a) => H.tab_activate(ctx, a),
   tab_create: (ctx, a) => H.tab_create(ctx, a),
@@ -98,7 +100,13 @@ async function main(): Promise<void> {
     }
   }
 
-  const server = new McpServer({ name: "remora", version: "0.1.0" });
+  const server = new McpServer(
+    { name: "remora", version: "0.1.0" },
+    {
+      instructions:
+        "Remora shows the user live indicators while you use their Chrome. Call task_begin (with a short label) before your first browser action and task_end as soon as you finish, before your final answer.",
+    },
+  );
   for (const def of TOOL_DEFS) {
     const handler = HANDLERS[def.name];
     server.registerTool(
@@ -138,6 +146,8 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+  // The MCP client closing stdin is the only "session over" signal we get.
+  process.stdin.on("close", shutdown);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

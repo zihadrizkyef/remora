@@ -94,9 +94,11 @@ Load extension: `chrome://extensions` → Developer mode → Load unpacked →
 - Komentar kode: hanya untuk constraint yang tak terlihat dari kode
   (mis. trik React native setter, batas MV3). Tanpa atribusi.
 
-## 6. Katalog MCP Tools (56, full — tanpa MVP)
+## 6. Katalog MCP Tools (58, full — tanpa MVP)
 
 - Koneksi: `remora_status` (lapor `claims` aktif + `agentId` sesi ini)
+- Siklus tugas: `task_begin` (label singkat), `task_end` (selesai). Indikator
+  menyala sampai `task_end` (lihat §7).
 - Tab & window: `tabs_list` (tandai `claimedBy`/`claimNote`/`claimedByMe`),
   `tab_activate`, `tab_create` (auto-klaim), `tab_claim`, `tab_release`,
   `tab_close`, `tab_duplicate` (auto-klaim),
@@ -130,17 +132,35 @@ Lima lapis, semuanya **non-interaktif** (tanpa tombol Stop/Pause):
    Teks kecil (11px, border 1px tipis). Dot memancarkan 2 gelombang
    radar (diameter 20vw = radius 10% lebar layar, border 2.5px teal,
    periode 1 detik, offset setengah detik) yang selalu terlihat.
-   Auto-fade 8 detik idle (opacity idle 0.7, lalu hidden + animasi mati).
+   Dua baris: "Remora · agent bekerja — <label>" dan "langkah N · mm:ss ·
+   aksi terakhir". Tidak memudar sendiri; menyala sejak tool pertama
+   sampai tugas berakhir.
 2. **Badge** merah bertuliskan "AI" pada ikon extension tab aktif
    + tooltip aksi terakhir.
-3. **Prefix `🟢 [Agent] `** pada `document.title` selama sesi aktif
+3. **Prefix `🟢 [Agent] `** pada `document.title` selama tugas berjalan
    (MutationObserver).
 4. **Favicon badge**: dot teal pada favicon situs (fallback lingkaran
-   polos bila favicon cross-origin tanpa CORS); dikembalikan saat idle.
+   polos bila favicon cross-origin tanpa CORS); dikembalikan saat tugas berakhir.
 5. **Highlight amber 1.2 detik** (outline 3px + glow) pada elemen target
    tiap aksi.
 6. Isi ketikan user TIDAK BOLEH tampil di pill ("mengetik di …" saja).
-7. Sumber data: event `agent_activity { tabId, action, target, ts }` dari MCP.
+7. Sumber data: notifikasi `activity.show { tabId, action, target, task }`
+   dan `task.end { tabId, outcome, label, steps, durationMs }` dari MCP.
+
+### Siklus tugas (mulai / berjalan / selesai / putus)
+
+Tugas dimulai di `task_begin` atau implisit di tool pertama yang menyentuh
+tab; berakhir di `task_end`. Saat berakhir, 🟢/badge "AI"/dot favicon dilepas
+seketika dan hanya penanda hasil yang bertahan sebentar:
+
+| Hasil | Pill | Judul / badge | Durasi |
+|---|---|---|---|
+| `done` | hijau "selesai ✓ · N langkah · durasi" | `✅` / "OK" | ±4 detik |
+| `timeout` | amber "agent berhenti tanpa sinyal selesai" | `⚠️` / "!" | ±6 detik |
+| `aborted` | amber "sesi agent ditutup" | `⚠️` / "!" | ±6 detik |
+
+`timeout`: tidak ada tool selama 90 detik (`TASK_IDLE_TIMEOUT_MS`).
+`aborted`: stdin MCP tertutup / server berhenti. Mockup: `design/Remora Task Indicator.html`.
 
 ## 8. Upload File (final: injeksi bytes, tanpa dialog Explorer)
 
@@ -171,6 +191,6 @@ Drag-drop via event sintetis; file >50MB via chunking ±256KB + progress.
 
 - `npm run typecheck` dan `npm run test` bersih.
 - Checklist E2E (docs/INSTALL.md) lolos: pairing → snapshot → klik/ketik
-  (pill+badge+title+highlight terlihat) → idle 8s (pill fade, title pulih) →
+  (pill+badge+title+highlight terlihat) → `task_end` (pill hijau ±4s, title pulih) →
   screenshot annotated → clipboard → upload 4 skenario → JS gated → network.
 - Ikon tajam di toolbar 16px. Folder `dist/` siap rilis.
