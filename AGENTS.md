@@ -117,17 +117,26 @@ Load extension: `chrome://extensions` → Developer mode → Load unpacked →
 Detail tiap tool + contoh: `docs/TOOLS.md`. Menambah tool baru =
 tambah skema di `protocol`, method WS, handler di extension, registrasi di MCP.
 
-## 7. Indikator "Tab Dipakai Agent" (final: Pill + Badge, info saja)
+## 7. Indikator "Tab Dipakai Agent" (final: Pill + Badge + Favicon, info saja)
 
-Empat lapis, semuanya **non-interaktif** (tanpa tombol Stop/Pause):
+Lima lapis, semuanya **non-interaktif** (tanpa tombol Stop/Pause):
 
-1. **Pill melayang** (Shadow DOM, kanan-bawah, `pointer-events:none`):
-   dot status + "Remora · agent aktif" + aksi terakhir. Auto-fade 8 detik idle.
-2. **Badge** ikon extension pada tab aktif + tooltip aksi terakhir.
-3. **Prefix `● `** pada `document.title` selama sesi aktif (MutationObserver).
-4. **Highlight pulse 600ms** pada elemen target tiap aksi.
-5. Isi ketikan user TIDAK BOLEH tampil di pill ("mengetik di …" saja).
-6. Sumber data: event `agent_activity { tabId, action, target, ts }` dari MCP.
+1. **Pill melayang** (Shadow DOM, kanan-atas, `pointer-events:none`):
+   dot teal 10px berdenyut + "Remora · agent aktif" + aksi terakhir.
+   Teks kecil (11px, border 1px tipis). Dot memancarkan 2 gelombang
+   radar (diameter 20vw = radius 10% lebar layar, border 2.5px teal,
+   periode 1 detik, offset setengah detik) yang selalu terlihat.
+   Auto-fade 8 detik idle (opacity idle 0.7, lalu hidden + animasi mati).
+2. **Badge** merah bertuliskan "AI" pada ikon extension tab aktif
+   + tooltip aksi terakhir.
+3. **Prefix `🟢 [Agent] `** pada `document.title` selama sesi aktif
+   (MutationObserver).
+4. **Favicon badge**: dot teal pada favicon situs (fallback lingkaran
+   polos bila favicon cross-origin tanpa CORS); dikembalikan saat idle.
+5. **Highlight amber 1.2 detik** (outline 3px + glow) pada elemen target
+   tiap aksi.
+6. Isi ketikan user TIDAK BOLEH tampil di pill ("mengetik di …" saja).
+7. Sumber data: event `agent_activity { tabId, action, target, ts }` dari MCP.
 
 ## 8. Upload File (final: injeksi bytes, tanpa dialog Explorer)
 

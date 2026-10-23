@@ -290,8 +290,8 @@ const badgeTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
 async function setTabBadge(tabId: number, action?: string, target?: string): Promise<void> {
   try {
-    await chrome.action.setBadgeText({ tabId, text: "●" });
-    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#0d9488" });
+    await chrome.action.setBadgeText({ tabId, text: "AI" });
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#dc2626" });
     const label = target ? `${action ?? "working"} — ${target}` : (action ?? "agent active");
     await chrome.action.setTitle({ tabId, title: `Remora: ${label}` });
   } catch {
