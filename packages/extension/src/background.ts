@@ -5,20 +5,49 @@
  * - Routes wire methods: background-implemented (tabs, navigation capture,
  *   cookies, downloads, screenshots) vs content-routed (per-tab DOM work).
  * - Tracks per-tab state for the activity UI (badge, pending notifications).
+ * - Enforces tab isolation: every request names its agent session, and only
+ *   tabs inside that session's Remora tab group may be touched.
  */
 
 import {
   DEFAULT_WS_PORT,
+  NO_GROUP_TAB_MESSAGE,
+  OUT_OF_GROUP_MESSAGE,
+  SessionEndPayloadSchema,
   ShowActivityPayloadSchema as ActivityShowSchema,
+  TAB_GROUP_NONE,
   TaskEndPayloadSchema,
   WS_PATH,
   WireErrorCode,
+  checkTab,
+  clampIndexToGroup,
+  groupForNewTab,
+  hostOf,
+  isDownloadInScope,
+  isTabAllowed,
+  isUrlInScope,
+  ownerOf,
+  resolveImplicitTab,
   tokenProtocols,
   parseWireFrame,
   validateMethodParams,
+  visibleTabs,
 } from "@remora/protocol";
-import type { TaskSnapshotPayload } from "@remora/protocol";
-import { isSiteBlocked, isWireError, loadSettings, saveSettings, wireError } from "./shared.js";
+import type { OwnedGroup, TaskSnapshotPayload } from "@remora/protocol";
+import {
+  createGroupedTab,
+  forgetGroup,
+  groupFor,
+  loadGroups,
+  rememberHost,
+  releaseSession,
+  setWorkingTab,
+  showResult,
+  showRunning,
+  toRef,
+  updateGroups,
+} from "./groups.js";
+import { isSiteBlocked, isWireError, loadSettings, wireError } from "./shared.js";
 
 // ---------------------------------------------------------------------------
 // State
@@ -46,8 +75,8 @@ let blockedSites: string[] = [];
 
 const capturingTabs = new Map<number, { pattern?: string; entries: NetEntry[] }>();
 const completedAt = new Map<string, number>();
-let blockPatterns: string[] = [];
-let blockEnabled = false;
+/** Tabs an agent has addressed, so their close/navigation is reported only to the hub. */
+const agentTabs = new Map<number, string>();
 
 // Content-script readiness + upload staging live in each tab's content
 // script; background only forwards messages and reports errors.
@@ -63,8 +92,6 @@ async function refreshSettings(): Promise<void> {
   jsEvalEnabled = s.jsEvalEnabled;
   netCaptureEnabled = s.netCaptureEnabled;
   blockedSites = s.blockedSites;
-  blockEnabled = s.netBlockEnabled;
-  blockPatterns = s.netBlockPatterns;
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -84,24 +111,70 @@ void boot();
 async function boot(): Promise<void> {
   await refreshSettings();
   registerNetListeners();
-  // Rules survive worker restarts; re-apply them from persisted settings so a
-  // stale block list can never outlive the user turning blocking off.
-  await updateBlockingRules().catch(() => undefined);
+  // Older builds kept global dynamic block rules; blocking is now per group.
+  await clearLegacyBlockRules().catch(() => undefined);
+  await loadGroups().catch(() => undefined);
+  await rebuildBlockRules().catch(() => undefined);
   connect();
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   capturingTabs.delete(tabId);
-  sendEvent("tab_closed", { tabId });
+  const agentId = agentTabs.get(tabId);
+  agentTabs.delete(tabId);
+  if (agentId) sendEvent("tab_closed", { tabId, agentId });
   recentActivity.delete(tabId);
   clearTabBadge(tabId).catch(() => undefined);
+  scheduleBlockRebuild();
 });
 
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
-  if (info.status === "complete" && tab.url && tab.title) {
-    sendEvent("navigated", { tabId, url: tab.url, title: tab.title });
-  }
+  void (async () => {
+    const groups = await loadGroups();
+    const owner = ownerOf(groups, tab.groupId ?? TAB_GROUP_NONE);
+    if (info.groupId !== undefined) {
+      // The user dragged the tab in or out of a group: access follows at once.
+      scheduleBlockRebuild();
+      const had = agentTabs.get(tabId);
+      if (had && had !== owner) revokeTab(tabId);
+      if (owner) await rememberHost(tab.groupId!, tab.url);
+    }
+    if (!owner) return;
+    if (info.url) await rememberHost(tab.groupId!, info.url);
+    if (info.status === "complete" && tab.url && tab.title) {
+      agentTabs.set(tabId, owner);
+      sendEvent("navigated", { tabId, agentId: owner, url: tab.url, title: tab.title });
+    }
+  })();
 });
+
+// Links opened from a group tab (target=_blank, window.open) join that group.
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab.id === undefined || tab.openerTabId === undefined) return;
+  void (async () => {
+    const opener = await chrome.tabs.get(tab.openerTabId!).catch(() => undefined);
+    const groupId = groupForNewTab(
+      { groupId: tab.groupId ?? TAB_GROUP_NONE, windowId: tab.windowId, openerTabId: tab.openerTabId },
+      opener ? toRef(opener) : undefined,
+      await loadGroups(),
+    );
+    if (groupId !== undefined) await chrome.tabs.group({ groupId, tabIds: tab.id! }).catch(() => undefined);
+  })();
+});
+
+// Closing or ungrouping the whole group ends the session's access to it.
+chrome.tabGroups.onRemoved.addListener((group) => {
+  void forgetGroup(group.id).then(() => scheduleBlockRebuild());
+});
+
+/** Access to this tab is gone: drop its markers and per-tab agent state. */
+function revokeTab(tabId: number): void {
+  agentTabs.delete(tabId);
+  capturingTabs.delete(tabId);
+  recentActivity.delete(tabId);
+  clearTabBadge(tabId).catch(() => undefined);
+  void chrome.tabs.sendMessage(tabId, { type: "remora:release" }).catch(() => undefined);
+}
 
 // Popup bridge: status queries, manual reconnect, audit-log reads.
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -271,14 +344,18 @@ async function handleFrame(raw: string): Promise<void> {
     return;
   }
   if (frame.kind === "request") {
-    const { id, method, params } = frame.value;
+    const { id, method, params, agentId } = frame.value;
+    if (!agentId) {
+      send({ id, ok: false, error: { code: "BAD_ARGS", message: "request without agentId; update the Remora MCP server" } });
+      return;
+    }
     const check = validateMethodParams(method, params ?? {});
     if (!check.ok) {
       send({ id, ok: false, error: { code: "BAD_ARGS", message: check.message } });
       return;
     }
     try {
-      const result = await dispatch(method, (params ?? {}) as Record<string, unknown>);
+      const result = await dispatch(method, (params ?? {}) as Record<string, unknown>, agentId);
       send({ id, ok: true, result: result ?? {} });
     } catch (err) {
       if (isWireError(err)) {
@@ -312,6 +389,10 @@ function handleNotification(notification: string, payload: unknown): void {
     void chrome.tabs
       .sendMessage(p.tabId, { type: "remora:activity", action: p.action, target: p.target, task: p.task })
       .catch(() => undefined);
+    if (p.agentId && p.task) {
+      const task = p.task;
+      void groupFor(p.agentId).then((g) => g && showRunning(g.groupId, task.label, task.step));
+    }
     return;
   }
   if (notification === "task.end") {
@@ -321,6 +402,9 @@ function handleNotification(notification: string, payload: unknown): void {
     recentActivity.delete(p.tabId);
     void showResultBadge(p.tabId, p.outcome);
     void appendActivityLog(p.tabId, `task ${p.outcome}`, `${p.steps} langkah`);
+    if (p.agentId && p.outcome !== "aborted") {
+      void groupFor(p.agentId).then((g) => g && showResult(g.groupId, p.outcome, p.label));
+    }
     void chrome.tabs
       .sendMessage(p.tabId, {
         type: "remora:task_end",
@@ -330,6 +414,15 @@ function handleNotification(notification: string, payload: unknown): void {
         durationMs: p.durationMs,
       })
       .catch(() => undefined);
+    return;
+  }
+  if (notification === "session.end") {
+    const parsed = SessionEndPayloadSchema.safeParse(payload);
+    if (!parsed.success) return;
+    void releaseSession(parsed.data.agentId).then((tabIds) => {
+      for (const tabId of tabIds) revokeTab(tabId);
+      scheduleBlockRebuild();
+    });
   }
 }
 
@@ -418,19 +511,55 @@ async function clearTabBadge(tabId: number): Promise<void> {
 
 type Params = Record<string, unknown>;
 
-async function activeTabId(): Promise<number> {
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tabs[0]?.id) throw wireError("NO_TAB", "no active tab");
-  return tabs[0].id;
+/**
+ * The only way a request reaches a tab. Explicit tabId must sit in the
+ * agent's group; no tabId means the agent's working tab inside the group,
+ * never the window's active tab. A missing tab answers like a foreign one.
+ */
+async function resolveTab(agentId: string, tabId?: number): Promise<chrome.tabs.Tab> {
+  const groups = await loadGroups();
+  let tab: chrome.tabs.Tab | undefined;
+  if (tabId !== undefined) {
+    tab = await chrome.tabs.get(tabId).catch(() => undefined);
+    const verdict = checkTab(tab && toRef(tab), agentId, groups);
+    if (!verdict.ok) throw wireError("OUT_OF_GROUP", verdict.message);
+  } else {
+    const g = groups.find((x) => x.agentId === agentId);
+    const tabs = g ? await chrome.tabs.query({ groupId: g.groupId }) : [];
+    const verdict = resolveImplicitTab(tabs.map(toRef), agentId, groups);
+    if (!verdict.ok) throw wireError("OUT_OF_GROUP", verdict.message);
+    tab = tabs.find((t) => t.id === verdict.tabId);
+  }
+  if (!tab?.id) throw wireError("OUT_OF_GROUP", OUT_OF_GROUP_MESSAGE);
+  agentTabs.set(tab.id, agentId);
+  await setWorkingTab(agentId, tab.id);
+  return tab;
 }
 
-async function resolveTab(tabId?: number): Promise<chrome.tabs.Tab> {
-  const id = tabId ?? (await activeTabId());
-  try {
-    return await chrome.tabs.get(id);
-  } catch {
-    throw wireError("NO_TAB", `tab ${id} not found`);
-  }
+async function requireGroup(agentId: string): Promise<OwnedGroup> {
+  const g = await groupFor(agentId);
+  if (!g) throw wireError("OUT_OF_GROUP", NO_GROUP_TAB_MESSAGE);
+  return g;
+}
+
+/** Hosts currently open in the agent's group: the cookie scope. */
+async function groupTabs(g: OwnedGroup): Promise<chrome.tabs.Tab[]> {
+  return chrome.tabs.query({ groupId: g.groupId });
+}
+
+function tabRow(t: chrome.tabs.Tab) {
+  return {
+    id: t.id,
+    windowId: t.windowId,
+    title: t.title ?? "",
+    url: t.url ?? "",
+    active: t.active,
+    pinned: t.pinned,
+    audible: t.audible ?? false,
+    muted: t.mutedInfo?.muted ?? false,
+    status: t.status ?? "",
+    groupId: t.groupId ?? TAB_GROUP_NONE,
+  };
 }
 
 async function guardSite(tab: chrome.tabs.Tab): Promise<void> {
@@ -507,9 +636,9 @@ const CONTENT_METHODS = new Set([
   "upload.abort",
 ]);
 
-async function dispatch(method: string, params: Params): Promise<unknown> {
+async function dispatch(method: string, params: Params, agentId: string): Promise<unknown> {
   if (CONTENT_METHODS.has(method)) {
-    const tab = await resolveTab(params.tabId as number | undefined);
+    const tab = await resolveTab(agentId, params.tabId as number | undefined);
     await guardSite(tab);
     if (method === "evaluate" && !jsEvalEnabled) {
       throw wireError("NOT_ALLOWED", "JS eval is disabled; enable it in the Remora popup");
@@ -523,88 +652,103 @@ async function dispatch(method: string, params: Params): Promise<unknown> {
   switch (method) {
     // -- tabs ---------------------------------------------------------------
     case "tabs.list": {
-      const tabs = await chrome.tabs.query({});
-      return tabs.map((t) => ({
-        id: t.id,
-        windowId: t.windowId,
-        title: t.title ?? "",
-        url: t.url ?? "",
-        active: t.active,
-        pinned: t.pinned,
-        audible: t.audible ?? false,
-        muted: t.mutedInfo?.muted ?? false,
-        status: t.status ?? "",
-      }));
+      const { visible } = visibleTabs(await chrome.tabs.query({}), agentId, await loadGroups());
+      return visible.map(tabRow);
+    }
+    case "tabs.resolve": {
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
+      return { tabId: tab.id, groupId: tab.groupId };
+    }
+    case "session.info": {
+      const all = await chrome.tabs.query({});
+      const g = await groupFor(agentId);
+      const mine = g ? all.filter((t) => t.groupId === g.groupId) : [];
+      const info = g ? await chrome.tabGroups.get(g.groupId).catch(() => null) : null;
+      return {
+        groupId: g?.groupId ?? null,
+        title: info?.title,
+        windowId: info?.windowId,
+        tabIds: mine.map((t) => t.id),
+        hiddenTabCount: all.length - mine.length,
+      };
     }
     case "tabs.activate": {
-      const tab = await resolveTab(params.tabId as number);
+      const tab = await resolveTab(agentId, params.tabId as number);
       await chrome.tabs.update(tab.id!, { active: true });
       await chrome.windows.update(tab.windowId, { focused: true });
       return { id: tab.id };
     }
     case "tabs.create": {
-      const tab = await chrome.tabs.create({
-        url: (params.url as string) || undefined,
-        active: params.active !== false,
-        windowId: params.windowId as number | undefined,
+      const tab = await createGroupedTab(agentId, {
+        url: params.url as string | undefined,
+        active: params.active as boolean | undefined,
+        label: params.label as string | undefined,
       });
-      return {
-        id: tab.id,
-        windowId: tab.windowId,
-        title: tab.title ?? "",
-        url: tab.url ?? "",
-        active: tab.active,
-        pinned: tab.pinned,
-      };
+      agentTabs.set(tab.id!, agentId);
+      scheduleBlockRebuild();
+      return tabRow(tab);
     }
     case "tabs.close": {
-      const tab = await resolveTab(params.tabId as number | undefined);
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
       await chrome.tabs.remove(tab.id!);
       return { closed: tab.id };
     }
     case "tabs.duplicate": {
-      const tab = await resolveTab(params.tabId as number | undefined);
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
       const dup = await chrome.tabs.duplicate(tab.id!);
-      return { id: dup?.id, windowId: dup?.windowId, title: dup?.title ?? "", url: dup?.url ?? "" };
+      if (!dup?.id) throw wireError("INTERNAL", "duplicate failed");
+      if (dup.groupId !== tab.groupId) await chrome.tabs.group({ groupId: tab.groupId, tabIds: dup.id });
+      agentTabs.set(dup.id, agentId);
+      await setWorkingTab(agentId, dup.id);
+      scheduleBlockRebuild();
+      return tabRow(await chrome.tabs.get(dup.id));
     }
     case "tabs.pin": {
-      const tab = await resolveTab(params.tabId as number | undefined);
-      await chrome.tabs.update(tab.id!, { pinned: params.pinned === true });
-      return { id: tab.id, pinned: params.pinned === true };
+      if (params.pinned === true) {
+        throw wireError("NOT_ALLOWED", "pinning removes the tab from its Remora group");
+      }
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
+      await chrome.tabs.update(tab.id!, { pinned: false });
+      return { id: tab.id, pinned: false };
     }
     case "tabs.mute": {
-      const tab = await resolveTab(params.tabId as number | undefined);
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
       await chrome.tabs.update(tab.id!, { muted: params.muted === true });
       return { id: tab.id, muted: params.muted === true };
     }
     case "tabs.move": {
-      const tab = await resolveTab(params.tabId as number | undefined);
-      await chrome.tabs.move(tab.id!, {
-        index: params.index as number,
-        windowId: params.windowId as number | undefined,
-      });
-      return { id: tab.id };
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
+      const windowId = params.windowId as number | undefined;
+      if (windowId !== undefined && windowId !== tab.windowId) {
+        throw wireError("NOT_ALLOWED", "the Remora group is bound to its window; moving tabs to another window is refused");
+      }
+      const groupId = tab.groupId!;
+      const indices = (await chrome.tabs.query({ groupId })).map((t) => t.index);
+      await chrome.tabs.move(tab.id!, { index: clampIndexToGroup(params.index as number, indices) });
+      const after = await chrome.tabs.get(tab.id!);
+      if (after.groupId !== groupId) await chrome.tabs.group({ groupId, tabIds: tab.id! });
+      return { id: tab.id, index: after.index };
     }
     case "windows.list": {
-      const wins = await chrome.windows.getAll({ populate: true });
-      return wins.map((w) => ({
-        id: w.id,
-        focused: w.focused,
-        state: w.state,
-        tabCount: w.tabs?.length ?? 0,
-      }));
+      const g = await groupFor(agentId);
+      if (!g) return [];
+      const info = await chrome.tabGroups.get(g.groupId).catch(() => null);
+      if (!info) return [];
+      const w = await chrome.windows.get(info.windowId);
+      const count = (await groupTabs(g)).length;
+      return [{ id: w.id, focused: w.focused, state: w.state, tabCount: count }];
     }
 
     // -- navigation ----------------------------------------------------------
     case "navigate": {
-      const tab = await resolveTab(params.tabId as number | undefined);
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
       await guardSite(tab);
       await chrome.tabs.update(tab.id!, { url: params.url as string });
       return { id: tab.id, url: params.url };
     }
     case "nav.back":
     case "nav.forward": {
-      const tab = await resolveTab(params.tabId as number | undefined);
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
       await guardSite(tab);
       // History traversal runs in-page; fall back gracefully.
       try {
@@ -619,7 +763,7 @@ async function dispatch(method: string, params: Params): Promise<unknown> {
       }
     }
     case "nav.reload": {
-      const tab = await resolveTab(params.tabId as number | undefined);
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
       await guardSite(tab);
       await chrome.tabs.reload(tab.id!, { bypassCache: params.hard === true });
       return { id: tab.id };
@@ -627,61 +771,58 @@ async function dispatch(method: string, params: Params): Promise<unknown> {
 
     // -- visual ----------------------------------------------------------------
     case "screenshot": {
-      const tab = await resolveTab(params.tabId as number | undefined);
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
       await guardSite(tab);
       return screenshotTab(tab, params);
     }
     case "export.pdf": {
+      await resolveTab(agentId, params.tabId as number | undefined);
       throw wireError("NOT_ALLOWED", "PDF export needs a debugger attach; not available in this build");
     }
 
     // -- clipboard (background side) ---------------------------------------------
-    case "clipboard.read": {
-      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      if (!tab?.id || !supportsContentScript(tab.url)) {
-        throw wireError("NOT_ALLOWED", "clipboard read needs a regular page in the active tab");
-      }
-      return toContent(tab.id, "clipboard.read", {});
-    }
+    case "clipboard.read":
     case "clipboard.write": {
+      // The clipboard belongs to whatever page has focus, so only act when
+      // that page is one of the agent's own tabs.
       const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      if (!tab?.id) throw wireError("NO_TAB", "no active tab");
-      if (!supportsContentScript(tab.url)) {
-        // Offscreen-free fallback: use the active tab via scripting.
-        throw wireError("NOT_ALLOWED", "clipboard write needs a regular page in the active tab");
+      if (!tab?.id || !isTabAllowed(toRef(tab), agentId, await loadGroups())) {
+        throw wireError("OUT_OF_GROUP", "clipboard needs one of your Remora group tabs to be the active tab");
       }
-      return toContent(tab.id, "clipboard.write", { text: params.text });
+      if (!supportsContentScript(tab.url)) {
+        throw wireError("NOT_ALLOWED", "clipboard needs a regular page in the active tab");
+      }
+      return toContent(tab.id, method, method === "clipboard.write" ? { text: params.text } : {});
     }
 
-    // -- cookies ------------------------------------------------------------------
-    case "cookies.list": {
-      const cookies = await chrome.cookies.getAll(
-        params.url ? { url: params.url as string } : {},
-      );
-      return cookies.map((c) => ({
-        name: c.name,
-        value: c.value,
-        domain: c.domain,
-        path: c.path,
-        secure: c.secure,
-        httpOnly: c.httpOnly,
-        sameSite: c.sameSite,
-        expirationDate: c.expirationDate,
-      }));
-    }
-    case "cookies.set": {
-      await chrome.cookies.set({
-        url: params.url as string,
-        name: params.name as string,
-        value: params.value as string,
-        expirationDate: params.expirationDate as number | undefined,
-      });
-      return { ok: true };
-    }
+    // -- cookies (scoped to sites open in the agent's group) ----------------------
+    case "cookies.list":
     case "cookies.clear": {
-      const cookies = await chrome.cookies.getAll(
-        params.url ? { url: params.url as string } : {},
-      );
+      const g = await requireGroup(agentId);
+      const urls = await cookieUrls(g, params.url as string | undefined);
+      const seen = new Set<string>();
+      const cookies: chrome.cookies.Cookie[] = [];
+      for (const url of urls) {
+        for (const c of await chrome.cookies.getAll({ url })) {
+          const key = `${c.domain}|${c.path}|${c.name}|${c.storeId}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            cookies.push(c);
+          }
+        }
+      }
+      if (method === "cookies.list") {
+        return cookies.map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path,
+          secure: c.secure,
+          httpOnly: c.httpOnly,
+          sameSite: c.sameSite,
+          expirationDate: c.expirationDate,
+        }));
+      }
       let removed = 0;
       for (const c of cookies) {
         const url = `${c.secure ? "https" : "http"}://${c.domain.replace(/^\./, "")}${c.path}`;
@@ -694,13 +835,24 @@ async function dispatch(method: string, params: Params): Promise<unknown> {
       }
       return { removed };
     }
+    case "cookies.set": {
+      const g = await requireGroup(agentId);
+      await cookieUrls(g, params.url as string);
+      await chrome.cookies.set({
+        url: params.url as string,
+        name: params.name as string,
+        value: params.value as string,
+        expirationDate: params.expirationDate as number | undefined,
+      });
+      return { ok: true };
+    }
 
     // -- network -------------------------------------------------------------------
     case "net.captureStart": {
       if (!netCaptureEnabled) {
         throw wireError("NOT_ALLOWED", "network capture is disabled; enable it in the Remora popup");
       }
-      const tab = await resolveTab(params.tabId as number | undefined);
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
       capturingTabs.set(tab.id!, {
         pattern: params.urlPattern as string | undefined,
         entries: [],
@@ -708,48 +860,68 @@ async function dispatch(method: string, params: Params): Promise<unknown> {
       return { capturing: tab.id };
     }
     case "net.captureStop": {
-      const tab = await resolveTab(params.tabId as number | undefined);
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
       capturingTabs.delete(tab.id!);
       return { stopped: tab.id };
     }
     case "net.captureGet": {
-      const tab = await resolveTab(params.tabId as number | undefined);
+      const tab = await resolveTab(agentId, params.tabId as number | undefined);
       const cap = capturingTabs.get(tab.id!);
       const entries = cap?.entries.slice(-500) ?? [];
       if (params.clear === true && cap) cap.entries = [];
       return { entries, capturing: !!cap };
     }
     case "net.block": {
+      const g = await requireGroup(agentId);
       const patterns = Array.isArray(params.patterns) ? (params.patterns as string[]) : [];
       if (params.enabled === true && patterns.length === 0) {
         throw wireError("NOT_ALLOWED", "net_block needs at least one pattern when enabled");
       }
-      blockPatterns = params.enabled === true ? patterns : [];
-      blockEnabled = params.enabled === true;
-      await updateBlockingRules();
-      await saveSettings({ netBlockEnabled: blockEnabled, netBlockPatterns: blockPatterns });
-      return { enabled: blockEnabled, patterns: blockPatterns };
+      const next = params.enabled === true ? patterns.slice(0, 100) : undefined;
+      await updateGroups((list) => list.map((x) => (x.groupId === g.groupId ? { ...x, blockPatterns: next } : x)));
+      await rebuildBlockRules();
+      return { enabled: !!next, patterns: next ?? [], scope: "your Remora group" };
     }
 
     // -- downloads -------------------------------------------------------------------
     case "downloads.list": {
-      const items = await chrome.downloads.search({
-        orderBy: ["-startTime"],
-        limit: (params.limit as number) || 20,
-      });
-      return items.map((d) => ({
-        id: d.id,
-        filename: d.filename,
-        state: d.state,
-        bytesReceived: d.bytesReceived,
-        totalBytes: d.totalBytes,
-        url: d.url,
-      }));
+      const g = await requireGroup(agentId);
+      const hosts = new Set(g.hosts);
+      for (const t of await groupTabs(g)) {
+        const h = hostOf(t.url);
+        if (h) hosts.add(h);
+      }
+      const items = await chrome.downloads.search({ orderBy: ["-startTime"], limit: 200 });
+      return items
+        .filter((d) => isDownloadInScope(d, { createdAt: g.createdAt, hosts: [...hosts] }))
+        .slice(0, (params.limit as number) || 20)
+        .map((d) => ({
+          id: d.id,
+          filename: d.filename,
+          state: d.state,
+          bytesReceived: d.bytesReceived,
+          totalBytes: d.totalBytes,
+          url: d.url,
+        }));
     }
 
     default:
       throw wireError("UNKNOWN_METHOD" satisfies WireErrorCode, `not implemented: ${method}`);
   }
+}
+
+/**
+ * Cookie URLs the agent may touch: one given URL inside the group's scope,
+ * or every http(s) page open in the group.
+ */
+async function cookieUrls(g: OwnedGroup, url: string | undefined): Promise<string[]> {
+  const tabUrls = (await groupTabs(g)).map((t) => t.url).filter((u): u is string => !!hostOf(u));
+  const hosts = [...new Set(tabUrls.map((u) => hostOf(u)!))];
+  if (url === undefined) return tabUrls;
+  if (!isUrlInScope(url, hosts)) {
+    throw wireError("OUT_OF_GROUP", "cookie URL is not a site open in your Remora group");
+  }
+  return [url];
 }
 
 // ---------------------------------------------------------------------------
@@ -780,10 +952,16 @@ async function screenshotTab(tab: chrome.tabs.Tab, params: Params): Promise<unkn
     await new Promise((r) => setTimeout(r, 120));
   }
 
+  // captureVisibleTab grabs whatever is visible, so make sure that is still
+  // the agent's tab on both sides of the capture (the user may switch tabs).
+  const stillOurs = async () =>
+    (await chrome.tabs.query({ active: true, windowId: tab.windowId }))[0]?.id === tab.id;
+  if (!(await stillOurs())) throw wireError("OUT_OF_GROUP", "the visible tab changed; retry the screenshot");
   const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
     format: format as "png" | "jpeg",
     quality: format === "jpeg" ? quality : undefined,
   });
+  if (!(await stillOurs())) throw wireError("OUT_OF_GROUP", "the visible tab changed; retry the screenshot");
 
   let clip: { x: number; y: number; width: number; height: number } | null = null;
   if (mode === "selector" || mode === "ref") {
@@ -867,16 +1045,44 @@ const BLOCK_RESOURCE_TYPES = [
   "other",
 ] as unknown as chrome.declarativeNetRequest.ResourceType[];
 
-async function updateBlockingRules(): Promise<void> {
+async function clearLegacyBlockRules(): Promise<void> {
   const existing = await chrome.declarativeNetRequest.getDynamicRules();
   const removeRuleIds = existing.filter((r) => r.id >= BLOCK_RULE_BASE).map((r) => r.id);
-  const addRules: chrome.declarativeNetRequest.Rule[] = blockEnabled
-    ? blockPatterns.slice(0, 500).map((pattern, i) => ({
-        id: BLOCK_RULE_BASE + i,
+  if (removeRuleIds.length > 0) await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds });
+}
+
+let blockRebuildTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Group membership changed; rules carry tab ids, so refresh them soon. */
+function scheduleBlockRebuild(): void {
+  if (blockRebuildTimer) clearTimeout(blockRebuildTimer);
+  blockRebuildTimer = setTimeout(() => {
+    blockRebuildTimer = null;
+    void rebuildBlockRules().catch(() => undefined);
+  }, 300);
+}
+
+/**
+ * Per-group blocking: session rules with a `tabIds` condition (only session
+ * rules support it), so one agent's block list never reaches the user's or
+ * another agent's tabs.
+ */
+async function rebuildBlockRules(): Promise<void> {
+  const existing = await chrome.declarativeNetRequest.getSessionRules();
+  const removeRuleIds = existing.filter((r) => r.id >= BLOCK_RULE_BASE).map((r) => r.id);
+  const addRules: chrome.declarativeNetRequest.Rule[] = [];
+  for (const g of await loadGroups()) {
+    if (!g.blockPatterns?.length) continue;
+    const tabIds = (await chrome.tabs.query({ groupId: g.groupId })).map((t) => t.id!).filter((id) => id >= 0);
+    if (tabIds.length === 0) continue;
+    for (const pattern of g.blockPatterns) {
+      addRules.push({
+        id: BLOCK_RULE_BASE + addRules.length,
         priority: 1,
         action: { type: "block" as chrome.declarativeNetRequest.RuleActionType },
-        condition: { urlFilter: pattern, resourceTypes: BLOCK_RESOURCE_TYPES },
-      }))
-    : [];
-  await chrome.declarativeNetRequest.updateDynamicRules({ removeRuleIds, addRules });
+        condition: { urlFilter: pattern, resourceTypes: BLOCK_RESOURCE_TYPES, tabIds },
+      });
+    }
+  }
+  await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds, addRules });
 }

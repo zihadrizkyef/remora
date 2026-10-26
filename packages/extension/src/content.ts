@@ -38,7 +38,7 @@ import {
   uploadDrop,
   uploadInject,
 } from "./content/uploads.js";
-import { hideAnnotate, showActivity, showAnnotate, showTaskEnd } from "./content/overlay.js";
+import { hideAnnotate, releaseIndicators, showActivity, showAnnotate, showTaskEnd } from "./content/overlay.js";
 import type { TaskInfo, TaskOutcome } from "./content/overlay.js";
 import { installCapture, readConsole, readErrors } from "./content/capture.js";
 
@@ -64,6 +64,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   };
   if (m.type === "remora:activity") {
     showActivity(m.action ?? "working", m.target, m.task);
+    return false;
+  }
+  if (m.type === "remora:release") {
+    releaseIndicators();
     return false;
   }
   if (m.type === "remora:task_end") {

@@ -78,7 +78,7 @@ export const WireErrorCode = z.enum([
   "BAD_ARGS", // params failed validation
   "NOT_FOUND", // selector/coordinate/cookie/... not found
   "NAVIGATED", // page navigated mid-action, refs invalidated
-  "TAB_CLAIMED", // tab is claimed by another agent session
+  "OUT_OF_GROUP", // tab is outside this session's Remora tab group
   "UPLOAD_ABORTED", // chunked transfer aborted or tab went away
   "FILE_TOO_LARGE", // exceeds UPLOAD_MAX_BYTES
   "UNKNOWN_METHOD", // method not implemented by this extension version
@@ -94,6 +94,8 @@ export const WireRequestSchema = z.object({
   id: z.string().min(1),
   method: z.string().min(1),
   params: z.unknown().optional(),
+  /** Calling agent session; the extension scopes every tab access to its group. */
+  agentId: z.string().min(1).optional(),
 });
 export type WireRequest = z.infer<typeof WireRequestSchema>;
 
@@ -160,13 +162,15 @@ export const WireMethods = {
   // -- tabs & windows (background) -----------------------------------------
   "tabs.list": z.object({}).optional(),
   "tabs.activate": z.object({ tabId: z.number().int() }),
+  /** Resolve (and access-check) the tab a call will land on. */
+  "tabs.resolve": z.object({ tabId: z.number().int().optional() }),
   "tabs.create": z.object({
     url: z.string().optional(),
     active: z.boolean().optional(),
-    windowId: z.number().int().optional(),
+    label: z.string().optional(),
   }),
   "tabs.close": z.object({ tabId: z.number().int().optional() }),
-  "tabs.duplicate": z.object({ tabId: z.number().int().optional() }),
+  "tabs.duplicate": z.object({ tabId: z.number().int().optional(), label: z.string().optional() }),
   "tabs.pin": z.object({ tabId: z.number().int().optional(), pinned: z.boolean() }),
   "tabs.mute": z.object({ tabId: z.number().int().optional(), muted: z.boolean() }),
   "tabs.move": z.object({
@@ -175,6 +179,8 @@ export const WireMethods = {
     windowId: z.number().int().optional(),
   }),
   "windows.list": z.object({}).optional(),
+  /** This session's group plus how many other tabs are hidden from it. */
+  "session.info": z.object({}).optional(),
 
   // -- navigation (background) ----------------------------------------------
   navigate: z.object({
@@ -386,21 +392,24 @@ export const WireMethods = {
     chunks: z.number().int().positive(),
   }),
   "upload.chunk": z.object({
+    tabId: z.number().int().optional(),
     transferId: z.string().min(1),
     index: z.number().int().nonnegative(),
     base64: z.string().min(1),
   }),
   "upload.inject": z.object({
+    tabId: z.number().int().optional(),
     transferId: z.string().min(1),
     ref: z.string().optional(),
     selector: z.string().optional(),
   }),
   "upload.drop": z.object({
+    tabId: z.number().int().optional(),
     transferId: z.string().min(1),
     ref: z.string().optional(),
     selector: z.string().optional(),
   }),
-  "upload.abort": z.object({ transferId: z.string().min(1) }),
+  "upload.abort": z.object({ tabId: z.number().int().optional(), transferId: z.string().min(1) }),
   "downloads.list": z.object({
     limit: z.number().int().positive().max(100).optional(),
   }),
@@ -451,6 +460,7 @@ export type TaskSnapshotPayload = z.infer<typeof TaskSnapshotSchema>;
 /** `task.end` notification (MCP -> extension): releases a tab's indicators. */
 export const TaskEndPayloadSchema = z.object({
   tabId: z.number().int(),
+  agentId: z.string().optional(),
   outcome: z.enum(["done", "timeout", "aborted"]),
   label: z.string().optional(),
   steps: z.number().int().nonnegative(),
@@ -458,9 +468,10 @@ export const TaskEndPayloadSchema = z.object({
 });
 export type TaskEndPayload = z.infer<typeof TaskEndPayloadSchema>;
 
-export const TabClosedPayloadSchema = z.object({ tabId: z.number().int() });
+export const TabClosedPayloadSchema = z.object({ tabId: z.number().int(), agentId: z.string().optional() });
 export const NavigatedPayloadSchema = z.object({
   tabId: z.number().int(),
+  agentId: z.string().optional(),
   url: z.string(),
   title: z.string(),
 });
@@ -477,12 +488,17 @@ export const UploadProgressPayloadSchema = z.object({
 
 export const ShowActivityPayloadSchema = z.object({
   tabId: z.number().int(),
+  agentId: z.string().optional(),
   action: z.string().optional(),
   /** Human-safe target label; MUST NOT contain typed text. */
   target: z.string().optional(),
   task: TaskSnapshotSchema.optional(),
 });
 export type ShowActivityPayload = z.infer<typeof ShowActivityPayloadSchema>;
+
+/** `session.end` (MCP -> extension): the agent process is gone; release its group. */
+export const SessionEndPayloadSchema = z.object({ agentId: z.string().min(1) });
+export type SessionEndPayload = z.infer<typeof SessionEndPayloadSchema>;
 
 // ---------------------------------------------------------------------------
 // Shared result shapes
@@ -498,6 +514,7 @@ export const TabInfoSchema = z.object({
   audible: z.boolean().optional(),
   muted: z.boolean().optional(),
   status: z.string().optional(),
+  groupId: z.number().int().optional(),
 });
 export type TabInfo = z.infer<typeof TabInfoSchema>;
 

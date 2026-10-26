@@ -79,7 +79,8 @@ untuk `127.0.0.1` dan tidak pernah keluar mesin.
 Di MCP client, jalankan tool berurutan:
 
 1. `remora_status` → `connected: true`.
-2. `tab_create` dengan `url: "https://example.com"`.
+2. `tab_create` dengan `url: "https://example.com"` → tab baru muncul di
+   grup `🤖 Remora · …`.
 3. `snapshot` → harus ada tree dengan `[ref=eN]`.
 4. `screenshot` → gambar tampil di respons.
 5. `click` sebuah ref → pill "Remora · agent aktif" muncul di halaman,
@@ -94,8 +95,8 @@ aplikasi lain memakai port 47291.
 Setiap sesi MCP men-spawn proses server sendiri, dan semuanya memakai port
 yang sama. Hanya satu proses yang bisa memegang port; proses lain otomatis
 **attach** ke hub itu lewat channel kontrol localhost, lalu meneruskan
-request lewat hub tersebut. Semua sesi tetap mendapat 54 tool dan bisa
-mengendalikan Chrome yang sama.
+request lewat hub tersebut. Semua sesi mendapat 56 tool, tetapi tiap sesi
+hanya melihat dan menyentuh tab di grup Remora miliknya sendiri.
 
 `remora_status` melaporkan peran proses lewat `hubRole`:
 
@@ -137,6 +138,23 @@ Jalankan berurutan, semua harus lolos:
 
 - [ ] Pairing: dot hijau, `remora_status.connected == true`.
 - [ ] `tabs_list` / `tab_create` / `navigate` / `go_back` / `reload`.
+- [ ] `tab_create` pertama membuat grup `🤖 Remora · …` (cyan saat berjalan);
+      `tabs_list` hanya berisi tab grup; `remora_status.hiddenTabs`
+      menyebut jumlah tab lain tanpa url/title.
+- [ ] Tab di luar grup ditolak: `snapshot`/`click`/`screenshot` dengan
+      `tabId` tab user → `OUT_OF_GROUP`; tanpa tab grup, `click` tanpa
+      `tabId` → error yang menyuruh `tab_create`.
+- [ ] Grup bertahan saat `navigate`/`reload` dan saat `task_end` (hanya
+      warna/judul berubah: green "selesai ✓" ±4 dtk lalu grey "siap").
+- [ ] Drag-in: seret tab user ke grup → muncul di `tabs_list`, bisa
+      di-`snapshot`. Drag-out: seret keluar → `OUT_OF_GROUP` seketika,
+      pill/badge/prefix judul di tab itu hilang.
+- [ ] Link `target=_blank` dari tab grup → tab baru otomatis masuk grup.
+- [ ] `tab_move` dengan `windowId` lain → ditolak; `tab_pin pinned:true` → ditolak.
+- [ ] Dua klien MCP sekaligus → dua grup terpisah; sesi A dapat
+      `OUT_OF_GROUP` untuk tab sesi B.
+- [ ] Tutup klien MCP → grup orange "sesi ditutup" ±6 dtk lalu di-ungroup,
+      tab tetap terbuka.
 - [ ] `snapshot` → klik/ketik via ref → **pill muncul** + badge + `● ` di
       title + highlight pulse 600ms di target.
 - [ ] Pill tetap menyala selama tugas (tanpa fade) → `task_end` → pill hijau

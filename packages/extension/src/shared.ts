@@ -9,10 +9,6 @@ export interface RemoraSettings {
   jsEvalEnabled: boolean;
   netCaptureEnabled: boolean;
   blockedSites: string[];
-  // Dynamic net_block rules outlive the service worker, so the flags that
-  // produced them are persisted too; boot reconciles the rules from these.
-  netBlockEnabled: boolean;
-  netBlockPatterns: string[];
 }
 
 export const DEFAULT_SETTINGS: RemoraSettings = {
@@ -21,8 +17,6 @@ export const DEFAULT_SETTINGS: RemoraSettings = {
   jsEvalEnabled: false,
   netCaptureEnabled: false,
   blockedSites: [],
-  netBlockEnabled: false,
-  netBlockPatterns: [],
 };
 
 export async function loadSettings(): Promise<RemoraSettings> {
@@ -33,8 +27,6 @@ export async function loadSettings(): Promise<RemoraSettings> {
     jsEvalEnabled: stored.jsEvalEnabled === true,
     netCaptureEnabled: stored.netCaptureEnabled === true,
     blockedSites: Array.isArray(stored.blockedSites) ? stored.blockedSites : [],
-    netBlockEnabled: stored.netBlockEnabled === true,
-    netBlockPatterns: Array.isArray(stored.netBlockPatterns) ? stored.netBlockPatterns : [],
   };
 }
 

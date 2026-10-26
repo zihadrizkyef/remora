@@ -45,6 +45,11 @@ export class TaskTracker {
     return this.running !== null;
   }
 
+  /** Label of the running task, if any. */
+  get label(): string | undefined {
+    return this.running?.label;
+  }
+
   /** Start a labelled task; a task still running is closed as done first. */
   begin(label?: string): TaskSnapshot {
     if (this.running) this.finish("done");

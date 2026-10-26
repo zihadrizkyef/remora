@@ -28,7 +28,7 @@ Panduan kontributor: [`AGENTS.md`](AGENTS.md)
 ## Struktur
 
 - `packages/protocol/` — kontrak wire + katalog tool (shared).
-- `packages/mcp-server/` — MCP stdio + WebSocket hub + 54 tools.
+- `packages/mcp-server/` — MCP stdio + WebSocket hub + 56 tools.
 - `packages/extension/` — extension MV3 (background, content, popup).
 - `design/` — mockup UI (skill claude-design).
 - `assets/icons/` — konsep + master ikon (skill create-icon).

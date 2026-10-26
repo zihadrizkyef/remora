@@ -89,22 +89,31 @@ Load extension: `chrome://extensions` → Developer mode → Load unpacked →
   WS di kedua sisi (defense in depth ringan).
 - Setiap tool yang menyentuh tab HARUS emit `agent_activity` (lihat §7).
 - Error wire: `{ code, message }` dengan code stabil
-  (`NO_TAB`, `NO_EXTENSION`, `TIMEOUT`, `NOT_ALLOWED`, `BAD_REF`, ...).
+  (`NO_TAB`, `NO_EXTENSION`, `TIMEOUT`, `NOT_ALLOWED`, `BAD_REF`,
+  `OUT_OF_GROUP`, ...).
+- Aturan akses tab = fungsi murni di `packages/protocol/src/access.ts`
+  (`isTabAllowed`, `resolveImplicitTab`, `groupForNewTab`, …), dipakai
+  extension (penegakan) dan MCP server (validasi ulang), diuji vitest.
 - Jangan pernah log token auth atau isi ketikan user.
 - Komentar kode: hanya untuk constraint yang tak terlihat dari kode
   (mis. trik React native setter, batas MV3). Tanpa atribusi.
 
-## 6. Katalog MCP Tools (58, full — tanpa MVP)
+## 6. Katalog MCP Tools (56, full — tanpa MVP)
 
-- Koneksi: `remora_status` (lapor `claims` aktif + `agentId` sesi ini)
+- Koneksi: `remora_status` (lapor `agentId`, grup sesi ini, dan jumlah tab
+  lain yang disembunyikan — tanpa url/title)
 - Siklus tugas: `task_begin` (label singkat), `task_end` (selesai). Indikator
   menyala sampai `task_end` (lihat §7).
-- Tab & window: `tabs_list` (tandai `claimedBy`/`claimNote`/`claimedByMe`),
-  `tab_activate`, `tab_create` (auto-klaim), `tab_claim`, `tab_release`,
-  `tab_close`, `tab_duplicate` (auto-klaim),
-  `tab_pin`, `tab_mute`, `tab_move`, `windows_list`
-- Klaim tab: tiap sesi agent punya identitas; tool pengubah tab milik sesi
-  lain gagal cepat `TAB_CLAIMED`; tool baca selalu lolos.
+- Tab & window: `tabs_list` (hanya tab grup sesi), `tab_activate`,
+  `tab_create` (membuat/mengisi grup sesi), `tab_close`, `tab_duplicate`
+  (ikut grup), `tab_pin` (unpin saja), `tab_mute`, `tab_move` (di dalam
+  grup, tanpa pindah window), `windows_list` (window grup saja)
+- Isolasi: tiap sesi agent (`agentId` per proses MCP) punya satu Chrome Tab
+  Group; SEMUA tool (baca maupun ubah) hanya boleh menyentuh tab di grup
+  itu, selain itu `OUT_OF_GROUP`. Tool tanpa `tabId` resolve ke working tab
+  di grup, bukan tab aktif window. Cookies/downloads/clipboard/net_block
+  dibatasi ke grup. Mekanisme klaim lama (`tab_claim`/`tab_release`,
+  `TAB_CLAIMED`) dihapus karena digantikan grup.
 - Navigasi: `navigate`, `go_back`, `go_forward`, `reload`
 - Persepsi: `snapshot`, `page_text`, `page_html`, `query`, `page_info`,
   `console_logs`, `page_errors`
@@ -123,9 +132,16 @@ Load extension: `chrome://extensions` → Developer mode → Load unpacked →
 Detail tiap tool + contoh: `docs/TOOLS.md`. Menambah tool baru =
 tambah skema di `protocol`, method WS, handler di extension, registrasi di MCP.
 
-## 7. Indikator "Tab Dipakai Agent" (final: Pill + Badge + Favicon, info saja)
+## 7. Indikator "Tab Dipakai Agent" (final: Tab Group + Pill + Badge + Favicon, info saja)
 
-Lima lapis, semuanya **non-interaktif** (tanpa tombol Stop/Pause):
+Penanda utama adalah **Chrome Tab Group** sesi: judul
+`🤖 Remora · <label> · langkah N` (diperbarui paling cepat tiap 3 detik),
+warna cyan = berjalan, green = selesai, orange = timeout/putus, grey = siap.
+Grup TIDAK dilepas saat `task_end` — hanya warna/judul berubah, lalu kembali
+"siap"; grup dilepas (ungroup, tab tetap terbuka) saat sesi MCP berakhir.
+Mockup: `design/Remora Tab Group.html`.
+
+Lapisan detail langkah, semuanya **non-interaktif** (tanpa tombol Stop/Pause):
 
 1. **Pill melayang** (Shadow DOM, kanan-atas, `pointer-events:none`):
    dot teal 10px berdenyut + "Remora · agent aktif" + aksi terakhir.
@@ -162,6 +178,13 @@ seketika dan hanya penanda hasil yang bertahan sebentar:
 `timeout`: tidak ada tool selama 90 detik (`TASK_IDLE_TIMEOUT_MS`).
 `aborted`: stdin MCP tertutup / server berhenti. Mockup: `design/Remora Task Indicator.html`.
 
+| Hasil | Warna grup | Judul grup |
+|---|---|---|
+| berjalan | cyan | `🤖 Remora · <label> · langkah N` |
+| `done` | green ±4 dtk → grey | `🤖 Remora · <label> · selesai ✓` → `🤖 Remora · siap` |
+| `timeout` | orange ±6 dtk → grey | `🤖 Remora · berhenti tanpa sinyal` |
+| `aborted` / sesi berakhir | orange ±6 dtk → ungroup | `🤖 Remora · sesi ditutup` (akses dicabut seketika) |
+
 ## 8. Upload File (final: injeksi bytes, tanpa dialog Explorer)
 
 Agent TIDAK PERNAH klik `<input type=file>`. Alur:
@@ -182,6 +205,10 @@ Drag-drop via event sintetis; file >50MB via chunking ±256KB + progress.
 
 - WS bind `127.0.0.1` saja + token acak (dibuat saat pertama jalan,
   disimpan di config user, pairing via popup).
+- Isolasi Tab Group: extension menolak request yang menyentuh tab di luar
+  grup milik `agentId` peminta (`OUT_OF_GROUP`); user menyeret tab masuk =
+  izin, keluar/tutup grup = cabut. Permission `tabGroups` + `tabs`.
+  Edge case: `docs/SECURITY.md`.
 - `evaluate_js` dan `net_capture_*` default OFF (toggle di popup).
 - Kill-switch per-site di popup; audit log semua aksi agent di popup.
 - `host_permissions: <all_urls>` — dokumentasikan risikonya di

@@ -28,8 +28,6 @@ const HANDLERS: Record<string, (ctx: Ctx, args: never) => Promise<unknown>> = {
   tab_pin: (ctx, a) => H.tab_pin(ctx, a),
   tab_mute: (ctx, a) => H.tab_mute(ctx, a),
   tab_move: (ctx, a) => H.tab_move(ctx, a),
-  tab_claim: (ctx, a) => H.tab_claim(ctx, a),
-  tab_release: (ctx, a) => H.tab_release(ctx, a),
   windows_list: (ctx) => H.windows_list(ctx),
   navigate: (ctx, a) => H.navigate(ctx, a),
   go_back: (ctx, a) => H.go_back(ctx, a),

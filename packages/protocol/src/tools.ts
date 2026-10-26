@@ -16,7 +16,7 @@ export interface ToolDef {
   activity: string;
 }
 
-const tabId = z.number().int().describe("Target tab id (default: active tab)").optional();
+const tabId = z.number().int().describe("Target tab id in your Remora group (default: your working tab)").optional();
 
 /** Locate an element: snapshot ref preferred, CSS selector fallback. */
 const target = {
@@ -30,7 +30,7 @@ function def(name: string, description: string, activity: string, schema: z.ZodR
 
 export const TOOL_DEFS: ToolDef[] = [
   // -- connection -------------------------------------------------------------
-  def("remora_status", "Remora bridge status: extension connected, versions, tab count, tabs currently showing agent activity.", "status check", {}),
+  def("remora_status", "Remora bridge status: extension connected, versions, your agent id, your Remora tab group, and how many other tabs are hidden from you.", "status check", {}),
 
   def("task_begin", "Announce the start of a task. Remora keeps its on-screen 'agent active' indicators lit until you call task_end. Call this first, with a short label such as 'Cari headset termurah'.", "starting task", {
     label: z.string().describe("Short task name shown to the user (max 60 chars)").optional(),
@@ -38,27 +38,22 @@ export const TOOL_DEFS: ToolDef[] = [
   def("task_end", "Announce that your task is finished, successfully or not. ALWAYS call this when you are done using the browser, before your final answer; otherwise the indicators stay lit until a 90s idle timeout and show the agent as cut off.", "finishing task", {}),
 
   // -- tabs & windows -----------------------------------------------------------
-  def("tabs_list", "List all open tabs across windows (id, title, url, active, pinned).", "listing tabs", {}),
-  def("tab_activate", "Activate (focus) a tab by id.", "activating tab", { tabId: z.number().int().describe("Tab id to activate") }),
-  def("tab_create", "Open a new tab, optionally with a URL.", "opening tab", {
+  def("tabs_list", "List the tabs in YOUR Remora tab group (id, title, url, active, pinned). Tabs outside the group are never shown and cannot be touched.", "listing tabs", {}),
+  def("tab_activate", "Activate (focus) a tab in your group by id.", "activating tab", { tabId: z.number().int().describe("Tab id to activate") }),
+  def("tab_create", "Open a new tab inside your Remora tab group (the group is created on first use). This is the only way to get a tab you may work in.", "opening tab", {
     url: z.string().describe("URL to open (optional)").optional(),
     active: z.boolean().describe("Focus the new tab (default true)").optional(),
   }),
-  def("tab_close", "Close a tab by id (default: active tab).", "closing tab", { tabId }),
-  def("tab_duplicate", "Duplicate a tab (default: active tab).", "duplicating tab", { tabId }),
-  def("tab_pin", "Pin or unpin a tab.", "pinning tab", { tabId, pinned: z.boolean() }),
+  def("tab_close", "Close a tab in your group (default: your working tab).", "closing tab", { tabId }),
+  def("tab_duplicate", "Duplicate a tab in your group; the copy joins the group.", "duplicating tab", { tabId }),
+  def("tab_pin", "Unpin a tab in your group. Pinning is refused: Chrome removes pinned tabs from their group.", "pinning tab", { tabId, pinned: z.boolean() }),
   def("tab_mute", "Mute or unmute a tab.", "muting tab", { tabId, muted: z.boolean() }),
-  def("tab_move", "Move a tab to a new index, optionally to another window.", "moving tab", {
+  def("tab_move", "Reorder a tab within your group (index is clamped to the group). Moving to another window is refused: the group lives in one window.", "moving tab", {
     tabId,
     index: z.number().int().describe("New zero-based index"),
-    windowId: z.number().int().describe("Target window id (optional)").optional(),
+    windowId: z.number().int().describe("Must be the group's window if given").optional(),
   }),
-  def("tab_claim", "Claim a tab for exclusive use by this agent session. Other sessions are blocked from touching it until released. Tabs you create are auto-claimed.", "claiming tab", {
-    tabId,
-    note: z.string().describe("Short note shown to other agents, e.g. what you are doing").optional(),
-  }),
-  def("tab_release", "Release a tab you claimed so other agents may use it.", "releasing tab", { tabId }),
-  def("windows_list", "List browser windows (id, focused, tab count).", "listing windows", {}),
+  def("windows_list", "List the window that holds your Remora group (id, focused, tab count of the group).", "listing windows", {}),
 
   // -- navigation ---------------------------------------------------------------
   def("navigate", "Navigate a tab to a URL (http/https).", "navigating", {
@@ -175,8 +170,8 @@ export const TOOL_DEFS: ToolDef[] = [
   def("focus", "Focus an element without clicking.", "focusing", { tabId, ...target }),
 
   // -- clipboard ------------------------------------------------------------------------
-  def("clipboard_read", "Read text from the OS clipboard.", "reading clipboard", {}),
-  def("clipboard_write", "Write text to the OS clipboard.", "writing clipboard", { text: z.string() }),
+  def("clipboard_read", "Read text from the OS clipboard. Needs a tab of your group to be the active tab.", "reading clipboard", {}),
+  def("clipboard_write", "Write text to the OS clipboard. Needs a tab of your group to be the active tab.", "writing clipboard", { text: z.string() }),
   def("clipboard_copy_from", "Select an element's text and copy it to the clipboard.", "copying", {
     tabId,
     ...target,
@@ -205,16 +200,16 @@ export const TOOL_DEFS: ToolDef[] = [
     expression: z.string(),
     timeoutMs: z.number().int().positive().max(30_000).optional(),
   }),
-  def("cookies_list", "List cookies, optionally filtered by URL.", "reading cookies", {
+  def("cookies_list", "List cookies for the sites open in your group (url must be one of them).", "reading cookies", {
     url: z.string().optional(),
   }),
-  def("cookies_set", "Set a cookie for a URL.", "setting cookie", {
+  def("cookies_set", "Set a cookie for a site open in your group.", "setting cookie", {
     url: z.string(),
     name: z.string(),
     value: z.string(),
     expirationDate: z.number().describe("Unix seconds (optional)").optional(),
   }),
-  def("cookies_clear", "Clear cookies, optionally filtered by URL.", "clearing cookies", {
+  def("cookies_clear", "Clear cookies for the sites open in your group (or one url among them).", "clearing cookies", {
     url: z.string().optional(),
   }),
   def("storage_get", "Read localStorage/sessionStorage keys (omit keys for all).", "reading storage", {
@@ -239,7 +234,7 @@ export const TOOL_DEFS: ToolDef[] = [
     tabId,
     clear: z.boolean().describe("Clear buffer after reading").optional(),
   }),
-  def("net_block", "Enable/disable request blocking by URL substring patterns. Patterns are required when enabling, and ignored when disabling.", "blocking requests", {
+  def("net_block", "Enable/disable request blocking by URL substring patterns for the tabs in your group only. Patterns are required when enabling, and ignored when disabling.", "blocking requests", {
     patterns: z.array(z.string()).describe("URL substring patterns; required when enabled=true").optional(),
     enabled: z.boolean(),
   }),
@@ -260,7 +255,7 @@ export const TOOL_DEFS: ToolDef[] = [
     ...target,
     filePaths: z.array(z.string()).min(1),
   }),
-  def("downloads_list", "List recent downloads (filename, state, path).", "listing downloads", {
+  def("downloads_list", "List downloads started by sites in your group during this session (filename, state, path).", "listing downloads", {
     limit: z.number().int().positive().max(100).optional(),
   }),
 ];

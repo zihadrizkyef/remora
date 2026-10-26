@@ -1,5 +1,7 @@
 import {
   AgentActivityPayload,
+  OUT_OF_GROUP_MESSAGE,
+  TAB_GROUP_NONE,
   TabInfo,
   WireError,
   WireMethodName,
@@ -10,7 +12,8 @@ import { prepareFile, toolError, transferFile } from "../uploads.js";
 
 /**
  * Tool implementations. Each handler receives validated args and returns a
- * JSON-serializable result. Handlers that touch a tab also emit
+ * JSON-serializable result. Handlers that touch a tab resolve it through
+ * `guard` (the extension enforces the session's tab group) and emit
  * `activity.show` so the extension renders the in-page pill.
  */
 
@@ -46,12 +49,12 @@ export function toAgentError(err: unknown): Error {
         return toolError(`Not allowed: ${err.message}. Check the Remora popup toggles.`);
       case "SITE_BLOCKED":
         return toolError("This site is blocked by the user's per-site kill-switch. Stop and tell the user.");
-      case "TAB_CLAIMED":
+      case "OUT_OF_GROUP":
         return toolError(
-          `${err.message} Call tabs_list to see claimed tabs, then tab_create to work in your own tab.`,
+          `OUT_OF_GROUP: ${err.message}. You may only use tabs in your own Remora tab group: call tabs_list for them, or tab_create for a new one.`,
         );
       case "NO_TAB":
-        return toolError("Tab not found (it may have been closed). Call `tabs_list` for current tabs.");
+        return toolError("Tab not found (it may have been closed). Call `tabs_list` for your tabs.");
       default:
         return toolError(`${err.code}: ${err.message}`);
     }
@@ -72,74 +75,54 @@ async function call<T>(
   }
 }
 
-function touched(ctx: Ctx, tabId: number | undefined, activity: string, target?: string): void {
-  if (tabId === undefined) return;
+function touched(ctx: Ctx, tabId: number, activity: string, target?: string): void {
   ctx.hub.touch(tabId, activity, target);
 }
 
+const outOfGroup = () => toAgentError({ code: "OUT_OF_GROUP", message: OUT_OF_GROUP_MESSAGE });
+
 /**
- * Guard a mutating tool against another session's claim. Throws a
- * TAB_CLAIMED tool error naming the owner. Returns the resolved tabId for
- * activity reporting (may be undefined when the tab is implicit and the
- * active tab could not be determined — the extension call then fails as
- * before).
+ * Resolve the tab a call lands on. The extension enforces the group (explicit
+ * tabId must be in it; no tabId means this session's working tab, never the
+ * window's active tab). The answer is re-checked here as defense in depth.
  */
-async function guard(ctx: Ctx, tabId?: number): Promise<number | undefined> {
-  try {
-    const resolved = await ctx.hub.guardTab(tabId);
-    // Remember explicit targets as this session's working tab so later calls
-    // without tabId stay here instead of following another agent's focus.
-    const effective = tabId ?? resolved;
-    if (effective !== undefined) ctx.hub.setWorkingTab(effective);
-    return resolved;
-  } catch (err) {
-    throw toAgentError(err);
+async function guard(ctx: Ctx, tabId?: number): Promise<number> {
+  const r = await call<{ tabId: number; groupId: number }>(ctx, "tabs.resolve", { tabId });
+  const known = ctx.hub.groupId;
+  if (
+    (tabId !== undefined && r.tabId !== tabId) ||
+    r.groupId === TAB_GROUP_NONE ||
+    (known !== undefined && r.groupId !== known)
+  ) {
+    throw outOfGroup();
   }
+  ctx.hub.groupId = r.groupId;
+  return r.tabId;
 }
 
-/** Attach `claimedBy` info to tab rows so agents can avoid owned tabs. */
-function withClaims(ctx: Ctx, tabs: unknown): unknown {
-  if (!Array.isArray(tabs)) return tabs;
-  const byId = new Map(ctx.hub.listClaims().map((c) => [c.tabId, c]));
-  if (byId.size === 0) return tabs;
-  return tabs.map((t) => {
-    if (typeof t !== "object" || t === null || typeof (t as { id?: unknown }).id !== "number") return t;
-    const claim = byId.get((t as { id: number }).id);
-    if (!claim) return t;
-    return {
-      ...(t as Record<string, unknown>),
-      claimedBy: claim.ownerLabel ?? claim.agentId,
-      ...(claim.note ? { claimNote: claim.note } : {}),
-      claimedByMe: claim.agentId === ctx.hub.agentId,
-    };
-  });
-}
-
-/** Resolve "active tab" early so activity is attributed even when tabId is omitted. */
-async function resolveTabId(ctx: Ctx, tabId?: number): Promise<number | undefined> {
-  if (tabId !== undefined) return tabId;
-  // Prefer this session's own working tab over the window-active tab: without
-  // this, a session that never passes tabId always lands on whatever tab
-  // another agent focused last, then gets TAB_CLAIMED and makes a new tab.
-  const mine = ctx.hub.myWorkingTab();
-  if (mine !== undefined) return mine;
-  try {
-    const tabs = await ctx.hub.request<TabInfo[]>("tabs.list", {});
-    return tabs.find((t) => t.active)?.id;
-  } catch {
-    return undefined;
-  }
+/** Keep only rows of this session's group, whatever the extension sent. */
+function ownRows(ctx: Ctx, tabs: unknown): TabInfo[] {
+  if (!Array.isArray(tabs)) return [];
+  const gid = ctx.hub.groupId;
+  return (tabs as TabInfo[]).filter(
+    (t) =>
+      typeof t?.groupId === "number" &&
+      t.groupId !== TAB_GROUP_NONE &&
+      (gid === undefined || t.groupId === gid),
+  );
 }
 
 // -- connection ---------------------------------------------------------------
 
+interface SessionInfo {
+  groupId: number | null;
+  title?: string;
+  windowId?: number;
+  tabIds: number[];
+  hiddenTabCount: number;
+}
+
 export async function remora_status(ctx: Ctx): Promise<unknown> {
-  const active: AgentActivityPayload[] = listActive().map((a) => ({
-    tabId: a.tabId,
-    action: a.action,
-    target: a.target,
-    ts: a.ts,
-  }));
   // Every MCP session shares one hub; `hubRole` tells a user whether this
   // process owns the port or is forwarding to the session that does.
   const hubRole = ctx.hub.isPrimary ? "primary" : "attached";
@@ -147,21 +130,30 @@ export async function remora_status(ctx: Ctx): Promise<unknown> {
     return {
       connected: false,
       hubRole,
+      agentId: ctx.hub.agentId,
       hint: "Extension not connected. Ask the user to open Chrome with Remora installed and paired.",
-      activeTabs: active,
-      claims: ctx.hub.listClaims(),
     };
   }
+  const session = await call<SessionInfo>(ctx, "session.info", {});
+  const mine = new Set(session.tabIds);
+  const active: AgentActivityPayload[] = listActive()
+    .filter((a) => mine.has(a.tabId))
+    .map((a) => ({ tabId: a.tabId, action: a.action, target: a.target, ts: a.ts }));
   const ext = ctx.hub.extension;
   return {
     connected: true,
     hubRole,
     extensionVersion: ext?.version ?? "unknown",
     protocol: ext?.protocol ?? 1,
-    tabCount: ext?.tabCount ?? 0,
-    activeTabs: active,
-    claims: ctx.hub.listClaims(),
     agentId: ctx.hub.agentId,
+    task: ctx.hub.tasks.active ? { label: ctx.hub.tasks.label ?? null } : null,
+    group:
+      session.groupId === null
+        ? null
+        : { groupId: session.groupId, title: session.title, windowId: session.windowId, tabCount: session.tabIds.length },
+    hiddenTabs: `${session.hiddenTabCount} tab lain disembunyikan`,
+    activeTabs: active,
+    ...(session.groupId === null ? { hint: "No Remora tab group yet. Call tab_create to open your first tab." } : {}),
   };
 }
 
@@ -181,97 +173,58 @@ export async function task_end(ctx: Ctx): Promise<unknown> {
 // -- tabs & windows -------------------------------------------------------------
 
 export async function tabs_list(ctx: Ctx): Promise<unknown> {
-  const tabs = await call(ctx, "tabs.list", {});
-  // Drop claims for tabs that no longer exist; primary then broadcasts the trim.
-  if (Array.isArray(tabs) && ctx.hub.isPrimary) {
-    const ids = new Set<number>();
-    for (const t of tabs) {
-      if (typeof t === "object" && t !== null && typeof (t as { id?: unknown }).id === "number") {
-        ids.add((t as { id: number }).id);
-      }
-    }
-    ctx.hub.pruneClaims(ids);
-  }
-  return withClaims(ctx, tabs);
+  return ownRows(ctx, await call(ctx, "tabs.list", {}));
 }
 
 export async function tab_activate(ctx: Ctx, args: { tabId: number }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "tabs.activate", args);
-  touched(ctx, args.tabId, "activated tab");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "tabs.activate", { tabId: id });
+  touched(ctx, id, "activated tab");
   return r;
 }
 
+/** A new tab lands in this session's group (created on first use). */
+function adoptNewTab(ctx: Ctx, tab: TabInfo): void {
+  if (typeof tab.groupId !== "number" || tab.groupId === TAB_GROUP_NONE) throw outOfGroup();
+  ctx.hub.groupId = tab.groupId;
+}
+
 export async function tab_create(ctx: Ctx, args: { url?: string; active?: boolean }): Promise<unknown> {
-  const tab = await call<TabInfo>(ctx, "tabs.create", args);
-  // Own new tabs immediately so a second session never grabs them, and make
-  // it this session's working tab so later calls without tabId stay here.
-  await ctx.hub.claimTab(tab.id).catch(() => undefined);
-  ctx.hub.setWorkingTab(tab.id);
+  const tab = await call<TabInfo>(ctx, "tabs.create", { ...args, label: ctx.hub.tasks.label });
+  adoptNewTab(ctx, tab);
   touched(ctx, tab.id, "opened tab", tab.url || tab.title);
   return tab;
 }
 
-export async function tab_claim(ctx: Ctx, args: { tabId?: number; note?: string }): Promise<unknown> {
-  const id = await resolveTabId(ctx, args.tabId);
-  if (id === undefined) {
-    throw toolError("No tab to claim. Call tabs_list for current tabs, or tab_create for a fresh tab.");
-  }
-  try {
-    const claim = await ctx.hub.claimTab(id, args.note);
-    ctx.hub.setWorkingTab(id);
-    touched(ctx, id, "claimed tab", args.note);
-    return claim;
-  } catch (err) {
-    throw toAgentError(err);
-  }
-}
-
-export async function tab_release(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
-  const id = await resolveTabId(ctx, args.tabId);
-  if (id === undefined) {
-    throw toolError("No tab to release. Call tabs_list for current tabs.");
-  }
-  try {
-    const released = await ctx.hub.releaseTab(id);
-    return { released, tabId: id };
-  } catch (err) {
-    throw toAgentError(err);
-  }
-}
-
 export async function tab_close(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const id = await resolveTabId(ctx, args.tabId);
-  const r = await call(ctx, "tabs.close", { tabId: args.tabId });
-  if (id !== undefined) {
-    touched(ctx, id, "closed tab");
-    ctx.hub.clearWorkingTab(id);
-  }
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "tabs.close", { tabId: id });
+  touched(ctx, id, "closed tab");
   return r;
 }
 
 export async function tab_duplicate(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const tab = await call<TabInfo>(ctx, "tabs.duplicate", { tabId: args.tabId });
-  // A duplicate is a fresh tab for this session — own it like tab_create.
-  await ctx.hub.claimTab(tab.id).catch(() => undefined);
-  ctx.hub.setWorkingTab(tab.id);
+  const id = await guard(ctx, args.tabId);
+  const tab = await call<TabInfo>(ctx, "tabs.duplicate", { tabId: id, label: ctx.hub.tasks.label });
+  adoptNewTab(ctx, tab);
   touched(ctx, tab.id, "duplicated tab", tab.title);
   return tab;
 }
 
 export async function tab_pin(ctx: Ctx, args: { tabId?: number; pinned: boolean }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "tabs.pin", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), args.pinned ? "pinned tab" : "unpinned tab");
+  if (args.pinned) {
+    throw toolError("Pinning is refused: Chrome removes pinned tabs from their group, which would end your access.");
+  }
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "tabs.pin", { tabId: id, pinned: false });
+  touched(ctx, id, "unpinned tab");
   return r;
 }
 
 export async function tab_mute(ctx: Ctx, args: { tabId?: number; muted: boolean }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "tabs.mute", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), args.muted ? "muted tab" : "unmuted tab");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "tabs.mute", { tabId: id, muted: args.muted });
+  touched(ctx, id, args.muted ? "muted tab" : "unmuted tab");
   return r;
 }
 
@@ -279,9 +232,9 @@ export async function tab_move(
   ctx: Ctx,
   args: { tabId?: number; index: number; windowId?: number },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "tabs.move", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "moved tab");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "tabs.move", { ...args, tabId: id });
+  touched(ctx, id, "moved tab");
   return r;
 }
 
@@ -292,44 +245,46 @@ export async function windows_list(ctx: Ctx): Promise<unknown> {
 // -- navigation -------------------------------------------------------------------
 
 export async function navigate(ctx: Ctx, args: { tabId?: number; url: string }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "navigate", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "navigated", args.url);
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "navigate", { ...args, tabId: id });
+  touched(ctx, id, "navigated", args.url);
   return r;
 }
 
 export async function go_back(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "nav.back", { tabId: args.tabId });
-  touched(ctx, await resolveTabId(ctx, args.tabId), "went back");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "nav.back", { tabId: id });
+  touched(ctx, id, "went back");
   return r;
 }
 
 export async function go_forward(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "nav.forward", { tabId: args.tabId });
-  touched(ctx, await resolveTabId(ctx, args.tabId), "went forward");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "nav.forward", { tabId: id });
+  touched(ctx, id, "went forward");
   return r;
 }
 
 export async function reload(ctx: Ctx, args: { tabId?: number; hard?: boolean }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "nav.reload", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "reloaded");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "nav.reload", { ...args, tabId: id });
+  touched(ctx, id, "reloaded");
   return r;
 }
 
 // -- perception ---------------------------------------------------------------------
 
 export async function snapshot(ctx: Ctx, args: { tabId?: number; compact?: boolean }): Promise<unknown> {
-  const r = await call(ctx, "snapshot", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "read page");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "snapshot", { ...args, tabId: id });
+  touched(ctx, id, "read page");
   return r;
 }
 
 export async function page_text(ctx: Ctx, args: { tabId?: number; maxChars?: number }): Promise<unknown> {
-  const r = await call(ctx, "page.text", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "read text");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "page.text", { ...args, tabId: id });
+  touched(ctx, id, "read text");
   return r;
 }
 
@@ -337,8 +292,9 @@ export async function page_html(
   ctx: Ctx,
   args: { tabId?: number; ref?: string; selector?: string; maxChars?: number },
 ): Promise<unknown> {
-  const r = await call(ctx, "page.html", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "read HTML");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "page.html", { ...args, tabId: id });
+  touched(ctx, id, "read HTML");
   return r;
 }
 
@@ -346,24 +302,28 @@ export async function query(
   ctx: Ctx,
   args: { tabId?: number; selector: string; limit?: number },
 ): Promise<unknown> {
-  const r = await call(ctx, "query", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "queried page", args.selector);
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "query", { ...args, tabId: id });
+  touched(ctx, id, "queried page", args.selector);
   return r;
 }
 
 export async function page_info(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
-  return call(ctx, "page.info", { tabId: args.tabId });
+  const id = await guard(ctx, args.tabId);
+  return call(ctx, "page.info", { tabId: id });
 }
 
 export async function console_logs(
   ctx: Ctx,
   args: { tabId?: number; level?: string; limit?: number },
 ): Promise<unknown> {
-  return call(ctx, "console.logs", args);
+  const id = await guard(ctx, args.tabId);
+  return call(ctx, "console.logs", { ...args, tabId: id });
 }
 
 export async function page_errors(ctx: Ctx, args: { tabId?: number; limit?: number }): Promise<unknown> {
-  return call(ctx, "page.errors", args);
+  const id = await guard(ctx, args.tabId);
+  return call(ctx, "page.errors", { ...args, tabId: id });
 }
 
 // -- visual ---------------------------------------------------------------------------
@@ -379,21 +339,21 @@ export async function screenshot(
     quality?: number;
   },
 ): Promise<unknown> {
-  const r = await call(ctx, "screenshot", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "took screenshot");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "screenshot", { ...args, tabId: id });
+  touched(ctx, id, "took screenshot");
   return r;
 }
 
 export async function screenshot_annotated(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const id = await resolveTabId(ctx, args.tabId);
-  await call(ctx, "annotate.show", { tabId: args.tabId });
+  const id = await guard(ctx, args.tabId);
+  await call(ctx, "annotate.show", { tabId: id });
   try {
-    const shot = await call(ctx, "screenshot", { tabId: args.tabId, mode: "viewport" });
+    const shot = await call(ctx, "screenshot", { tabId: id, mode: "viewport" });
     touched(ctx, id, "took annotated screenshot");
     return shot;
   } finally {
-    await call(ctx, "annotate.hide", { tabId: args.tabId }).catch(() => undefined);
+    await call(ctx, "annotate.hide", { tabId: id }).catch(() => undefined);
   }
 }
 
@@ -401,8 +361,9 @@ export async function export_pdf(
   ctx: Ctx,
   args: { tabId?: number; landscape?: boolean },
 ): Promise<unknown> {
-  const r = await call(ctx, "export.pdf", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "exported PDF");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "export.pdf", { ...args, tabId: id });
+  touched(ctx, id, "exported PDF");
   return r;
 }
 
@@ -415,16 +376,16 @@ export async function click(
   ctx: Ctx,
   args: TargetArgs & { button?: "left" | "middle" | "right"; clickCount?: number },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "click", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "clicked", summarize("element", labelOf(args)));
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "click", { ...args, tabId: id });
+  touched(ctx, id, "clicked", summarize("element", labelOf(args)));
   return r;
 }
 
 export async function hover(ctx: Ctx, args: TargetArgs): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "hover", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "hovered", labelOf(args));
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "hover", { ...args, tabId: id });
+  touched(ctx, id, "hovered", labelOf(args));
   return r;
 }
 
@@ -432,9 +393,9 @@ export async function type(
   ctx: Ctx,
   args: TargetArgs & { text: string; submit?: boolean; clearFirst?: boolean },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "type", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "typed", `into ${labelOf(args) ?? "field"}`);
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "type", { ...args, tabId: id });
+  touched(ctx, id, "typed", `into ${labelOf(args) ?? "field"}`);
   return r;
 }
 
@@ -446,9 +407,9 @@ export async function fill_form(
     submit?: boolean;
   },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "form.fill", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "filled form", `${args.fields.length} fields`);
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "form.fill", { ...args, tabId: id });
+  touched(ctx, id, "filled form", `${args.fields.length} fields`);
   return r;
 }
 
@@ -456,16 +417,16 @@ export async function select_option(
   ctx: Ctx,
   args: TargetArgs & { values: string[] },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "select.option", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "selected option", args.values.join(", "));
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "select.option", { ...args, tabId: id });
+  touched(ctx, id, "selected option", args.values.join(", "));
   return r;
 }
 
 export async function set_checked(ctx: Ctx, args: TargetArgs & { checked: boolean }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "set.checked", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), args.checked ? "checked" : "unchecked", labelOf(args));
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "set.checked", { ...args, tabId: id });
+  touched(ctx, id, args.checked ? "checked" : "unchecked", labelOf(args));
   return r;
 }
 
@@ -477,10 +438,10 @@ export async function scroll(
     intoView?: boolean;
   },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "scroll", args);
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "scroll", { ...args, tabId: id });
   const what = args.intoView ? `to ${labelOf(args)}` : (args.direction ?? "page");
-  touched(ctx, await resolveTabId(ctx, args.tabId), "scrolled", what);
+  touched(ctx, id, "scrolled", what);
   return r;
 }
 
@@ -496,23 +457,23 @@ export async function drag(
     toY?: number;
   },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "drag", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "dragged");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "drag", { ...args, tabId: id });
+  touched(ctx, id, "dragged");
   return r;
 }
 
 export async function press_key(ctx: Ctx, args: TargetArgs & { key: string }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "press.key", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "pressed key", args.key);
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "press.key", { ...args, tabId: id });
+  touched(ctx, id, "pressed key", args.key);
   return r;
 }
 
 export async function focus(ctx: Ctx, args: TargetArgs): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "focus", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "focused", labelOf(args));
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "focus", { ...args, tabId: id });
+  touched(ctx, id, "focused", labelOf(args));
   return r;
 }
 
@@ -528,9 +489,9 @@ export async function clipboard_write(ctx: Ctx, args: { text: string }): Promise
 }
 
 export async function clipboard_copy_from(ctx: Ctx, args: TargetArgs): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "clipboard.copyFrom", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "copied", labelOf(args));
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "clipboard.copyFrom", { ...args, tabId: id });
+  touched(ctx, id, "copied", labelOf(args));
   return r;
 }
 
@@ -538,29 +499,23 @@ export async function clipboard_paste_to(
   ctx: Ctx,
   args: TargetArgs & { filePath?: string },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
+  const id = await guard(ctx, args.tabId);
   if (args.filePath) {
     const file = await prepareFile(args.filePath);
-    const id = await resolveTabId(ctx, args.tabId);
-    const base64 = file.data.toString("base64");
     const r = await call(ctx, "clipboard.pasteTo", {
-      tabId: args.tabId,
+      tabId: id,
       ref: args.ref,
       selector: args.selector,
       filePath: args.filePath,
       fileName: file.fileName,
       mimeType: file.mimeType,
-      base64,
+      base64: file.data.toString("base64"),
     });
     touched(ctx, id, "pasted file", file.fileName);
     return r;
   }
-  const r = await call(ctx, "clipboard.pasteTo", {
-    tabId: args.tabId,
-    ref: args.ref,
-    selector: args.selector,
-  });
-  touched(ctx, await resolveTabId(ctx, args.tabId), "pasted", labelOf(args));
+  const r = await call(ctx, "clipboard.pasteTo", { tabId: id, ref: args.ref, selector: args.selector });
+  touched(ctx, id, "pasted", labelOf(args));
   return r;
 }
 
@@ -570,11 +525,11 @@ export async function wait_for(
   ctx: Ctx,
   args: { tabId?: number; selector?: string; text?: string; navigation?: boolean; timeoutMs?: number },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "wait.for", args, Math.min((args.timeoutMs ?? 30_000) + 5_000, 130_000));
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "wait.for", { ...args, tabId: id }, Math.min((args.timeoutMs ?? 30_000) + 5_000, 130_000));
   touched(
     ctx,
-    await resolveTabId(ctx, args.tabId),
+    id,
     "waited",
     args.selector ?? (args.text ? `text "${args.text.slice(0, 40)}"` : args.navigation ? "navigation" : undefined),
   );
@@ -592,9 +547,9 @@ export async function evaluate_js(
   ctx: Ctx,
   args: { tabId?: number; expression: string; timeoutMs?: number },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "evaluate", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "ran script");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "evaluate", { ...args, tabId: id });
+  touched(ctx, id, "ran script");
   return r;
 }
 
@@ -617,9 +572,9 @@ export async function storage_get(
   ctx: Ctx,
   args: { tabId?: number; area: "local" | "session"; keys?: string[] },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "storage.get", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), `read ${args.area}Storage`);
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "storage.get", { ...args, tabId: id });
+  touched(ctx, id, `read ${args.area}Storage`);
   return r;
 }
 
@@ -627,10 +582,10 @@ export async function storage_set(
   ctx: Ctx,
   args: { tabId?: number; area: "local" | "session"; entries?: Record<string, string>; remove?: string[] },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
   if (!args.entries && !args.remove) throw toolError("Provide `entries` and/or `remove`.");
-  const r = await call(ctx, "storage.set", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), `wrote ${args.area}Storage`);
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "storage.set", { ...args, tabId: id });
+  touched(ctx, id, `wrote ${args.area}Storage`);
   return r;
 }
 
@@ -640,16 +595,16 @@ export async function net_capture_start(
   ctx: Ctx,
   args: { tabId?: number; urlPattern?: string },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "net.captureStart", args);
-  touched(ctx, await resolveTabId(ctx, args.tabId), "started capture", args.urlPattern);
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "net.captureStart", { ...args, tabId: id });
+  touched(ctx, id, "started capture", args.urlPattern);
   return r;
 }
 
 export async function net_capture_stop(ctx: Ctx, args: { tabId?: number }): Promise<unknown> {
-  await guard(ctx, args.tabId);
-  const r = await call(ctx, "net.captureStop", { tabId: args.tabId });
-  touched(ctx, await resolveTabId(ctx, args.tabId), "stopped capture");
+  const id = await guard(ctx, args.tabId);
+  const r = await call(ctx, "net.captureStop", { tabId: id });
+  touched(ctx, id, "stopped capture");
   return r;
 }
 
@@ -657,7 +612,8 @@ export async function net_capture_get(
   ctx: Ctx,
   args: { tabId?: number; clear?: boolean },
 ): Promise<unknown> {
-  return call(ctx, "net.captureGet", args);
+  const id = await guard(ctx, args.tabId);
+  return call(ctx, "net.captureGet", { ...args, tabId: id });
 }
 
 export async function net_block(
@@ -673,10 +629,10 @@ export async function upload_file(
   ctx: Ctx,
   args: TargetArgs & { filePath: string },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
+  const id = await guard(ctx, args.tabId);
   const file = await prepareFile(args.filePath);
-  const r = await transferFile(ctx.hub, file, args, "inject");
-  touched(ctx, await resolveTabId(ctx, args.tabId), "uploaded file", file.fileName);
+  const r = await transferFile(ctx.hub, file, { ...args, tabId: id }, "inject");
+  touched(ctx, id, "uploaded file", file.fileName);
   return { fileName: file.fileName, bytes: file.totalBytes, ...(r as object) };
 }
 
@@ -684,14 +640,14 @@ export async function upload_files(
   ctx: Ctx,
   args: TargetArgs & { filePaths: string[] },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
   if (args.filePaths.length > 10) throw toolError("Maximum 10 files per call.");
+  const id = await guard(ctx, args.tabId);
   const results: unknown[] = [];
   for (const p of args.filePaths) {
     const file = await prepareFile(p);
-    results.push(await transferFile(ctx.hub, file, args, "inject"));
+    results.push(await transferFile(ctx.hub, file, { ...args, tabId: id }, "inject"));
   }
-  touched(ctx, await resolveTabId(ctx, args.tabId), "uploaded files", `${args.filePaths.length} files`);
+  touched(ctx, id, "uploaded files", `${args.filePaths.length} files`);
   return { count: results.length, results };
 }
 
@@ -699,14 +655,14 @@ export async function drag_drop_files(
   ctx: Ctx,
   args: TargetArgs & { filePaths: string[] },
 ): Promise<unknown> {
-  await guard(ctx, args.tabId);
   if (args.filePaths.length > 10) throw toolError("Maximum 10 files per call.");
+  const id = await guard(ctx, args.tabId);
   const results: unknown[] = [];
   for (const p of args.filePaths) {
     const file = await prepareFile(p);
-    results.push(await transferFile(ctx.hub, file, args, "drop"));
+    results.push(await transferFile(ctx.hub, file, { ...args, tabId: id }, "drop"));
   }
-  touched(ctx, await resolveTabId(ctx, args.tabId), "dropped files", `${args.filePaths.length} files`);
+  touched(ctx, id, "dropped files", `${args.filePaths.length} files`);
   return { count: results.length, results };
 }
 

@@ -175,6 +175,16 @@ export function showTaskEnd(outcome: TaskOutcome, label: string | undefined, ste
   );
 }
 
+/** Access revoked (tab dragged out of the group): drop every marker now. */
+export function releaseIndicators(): void {
+  stopTick();
+  if (hideTimer) clearTimeout(hideTimer);
+  hideTimer = null;
+  prefixTitle(false);
+  resultTitle(null);
+  pillBox?.classList.add("hidden");
+}
+
 /** Result marker on the title (✅/⚠️); null restores the page's own title. */
 function resultTitle(prefix: string | null): void {
   if (prefix) {

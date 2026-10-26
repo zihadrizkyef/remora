@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Remora · Mockup Tab Group per Sesi</title>
+<style>
+  /* ============ ARTIFACT DESIGN SYSTEM ============
+     Surface: Operate. Pengguna melihat tab strip Chrome dan harus langsung tahu
+     tab mana yang boleh disentuh agent. Penanda utama = Tab Group Chrome (chip
+     berwarna + garis bawah tab), bukan dekorasi baru. Pill/badge/favicon tetap
+     sebagai detail langkah. Token diambil dari Remora Task Indicator.html.
+     Warna grup memakai palet asli chrome.tabGroups.Color:
+       cyan = berjalan, green = selesai, grey = siap, orange = putus/timeout.
+  ================================================ */
+  :root{
+    --canvas:#eceef1; --canvas-ink:#23262d; --canvas-muted:#6b7280;
+    --accent:#0d9488; --bad:#dc2626;
+    --g-cyan:#007b83; --g-green:#188038; --g-grey:#5f6368; --g-orange:#e8710a;
+    --mono:ui-monospace,"Cascadia Mono",Consolas,Menlo,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--canvas);color:var(--canvas-ink);font:14px/1.45 var(--sans);-webkit-font-smoothing:antialiased}
+  .page{max-width:1040px;margin:0 auto;padding:28px 16px 72px}
+  .kicker{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--canvas-muted);margin:0 0 4px}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{margin:0 0 16px;color:var(--canvas-muted);font-size:13px;max-width:72ch}
+  h2.sec{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--canvas-muted);margin:30px 0 10px}
+
+  .controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  .seg{display:flex;flex-wrap:wrap;background:#dde0e6;border-radius:8px;padding:3px;gap:2px}
+  .seg button{border:0;background:transparent;padding:7px 12px;border-radius:6px;cursor:pointer;font:600 13px var(--sans);color:#4b5563;min-height:36px}
+  .seg button[aria-pressed="true"]{background:#fff;color:#111;box-shadow:0 1px 2px rgba(0,0,0,.15)}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .hint{font-size:12px;color:var(--canvas-muted)}
+
+  /* ---------- browser frame ---------- */
+  .browser{background:#fff;border-radius:12px;overflow:hidden;border:1px solid #c9ced6;box-shadow:0 12px 32px rgba(20,24,32,.16)}
+  .tabstrip{display:flex;align-items:flex-end;gap:2px;background:#dee1e6;padding:8px 8px 0;overflow-x:auto}
+  .tab{position:relative;display:flex;align-items:center;gap:7px;width:168px;min-width:96px;flex:0 1 auto;padding:8px 12px 9px;border-radius:8px 8px 0 0;background:transparent;font-size:12px;color:#3c4043;cursor:default}
+  .tab.on{background:#fff;color:#111}
+  .tab .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tab.user{opacity:.95}
+  .tab[hidden]{display:none}
+  .fav{position:relative;width:16px;height:16px;border-radius:4px;flex:none}
+  .fav i{position:absolute;right:-3px;bottom:-3px;width:9px;height:9px;border-radius:50%;background:var(--accent);border:1.5px solid #fff;display:none}
+  .tab.agent.step .fav i{display:block}
+  /* Chrome draws a 3px line under grouped tabs in the group colour */
+  .tab.grouped::after{content:"";position:absolute;left:6px;right:6px;bottom:0;height:3px;border-radius:2px;background:var(--gc)}
+  .tab.grouped.on::after{bottom:auto;top:0;left:10px;right:10px}
+  .chip{flex:none;align-self:center;margin:0 4px 6px;padding:3px 9px;border-radius:7px;background:var(--gc);color:#fff;font:600 12px/18px var(--sans);
+    white-space:nowrap;max-width:300px;overflow:hidden;text-overflow:ellipsis;transition:background .25s}
+  .group{display:contents;--gc:var(--g-grey)}
+  .group[hidden]{display:none}
+  .toolbar{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid #e3e5e9}
+  .url{flex:1;background:#f1f3f4;border-radius:999px;padding:6px 14px;font-size:12px;color:#555;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ext{position:relative;width:28px;height:28px;border-radius:6px;background:#0d2b28;display:flex;align-items:center;justify-content:center;flex:none}
+  .badge{position:absolute;right:-6px;bottom:-5px;min-width:18px;padding:1px 4px;border-radius:4px;color:#fff;font:700 9px/14px var(--sans);text-align:center;display:none}
+  .viewport{position:relative;height:210px;background:#faf7f5;overflow:hidden}
+  .sk{position:absolute;background:#ece7e3;border-radius:6px}
+  .pill{position:absolute;right:14px;top:14px;display:none;align-items:center;gap:9px;background:rgba(4,33,30,.9);color:#eafffb;
+    border:1px solid rgba(13,148,136,.55);border-radius:999px;padding:6px 14px 6px 10px;font:500 11px/1.4 var(--sans);max-width:min(400px,86%)}
+  .pill .l2{display:block;font:10.5px var(--mono);color:#7ff0e2}
+  .pill .d{width:10px;height:10px;border-radius:50%;background:#2dd4bf;flex:none}
+
+  /* states on the group */
+  [data-s="ready"]   .g-me{--gc:var(--g-grey)}
+  [data-s="running"] .g-me{--gc:var(--g-cyan)}
+  [data-s="done"]    .g-me{--gc:var(--g-green)}
+  [data-s="timeout"] .g-me,[data-s="aborted"] .g-me{--gc:var(--g-orange)}
+  [data-s="running"] .pill{display:flex}
+  [data-s="running"] .badge{display:block;background:var(--bad)}
+  [data-s="done"] .badge{display:block;background:#059669}
+  [data-s="timeout"] .badge,[data-s="aborted"] .badge{display:block;background:#b45309}
+  [data-s="released"] .g-me .chip{display:none}
+  [data-s="released"] .g-me .tab::after{display:none}
+
+  /* ---------- legend + rules ---------- */
+  .two{display:grid;grid-template-columns:1.1fr 1fr;gap:24px;margin-top:18px}
+  @media (max-width:760px){.two{grid-template-columns:1fr}}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid #d6d9df;vertical-align:top}
+  th{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--canvas-muted);font-weight:600}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:3px;vertical-align:-1px;margin-right:6px}
+  code{font:12px var(--mono);background:#e2e5ea;padding:1px 5px;border-radius:4px}
+  ol.rules{margin:0;padding-left:20px;font-size:13px}
+  ol.rules li{margin:0 0 6px}
+  .verdict{font:12px var(--mono);padding:8px 10px;border-radius:8px;background:#fff;border:1px solid #d6d9df;margin-top:10px;min-height:38px}
+  .verdict b.ok{color:#188038} .verdict b.no{color:#c5221f}
+  .slop{background:#fff;border:1px solid #d6d9df;border-radius:10px;padding:14px 16px;font-size:13px}
+  .slop ul{margin:6px 0 0;padding-left:18px}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main class="page">
+  <p class="kicker">Remora · mockup isolasi tab</p>
+  <h1>Satu Tab Group per sesi agent</h1>
+  <p class="sub">Agent hanya boleh menyentuh tab di dalam grup yang ia buat sendiri. Tab user di luar grup tidak dibaca, tidak diubah,
+    tidak di-screenshot, dan tidak muncul di <code>tabs_list</code>. Grup bertahan selama sesi hidup; yang berubah hanya judul dan warnanya.</p>
+
+  <div class="controls">
+    <div class="seg" role="group" aria-label="State grup">
+      <button data-state="ready">siap</button>
+      <button data-state="running" aria-pressed="true">berjalan</button>
+      <button data-state="done">selesai</button>
+      <button data-state="timeout">timeout</button>
+      <button data-state="aborted">putus</button>
+      <button data-state="released">dilepas</button>
+    </div>
+    <span class="hint" id="hint"></span>
+  </div>
+
+  <section class="browser" id="frame" data-s="running" aria-label="Contoh jendela Chrome">
+    <div class="tabstrip">
+      <div class="tab user"><span class="fav" style="background:#4285f4"></span><span class="t">Kotak masuk — surel kantor</span></div>
+      <div class="tab user"><span class="fav" style="background:#0f9d58"></span><span class="t">Laporan Q3 (draf)</span></div>
+      <div class="group g-me" id="gme">
+        <span class="chip" id="chip">🤖 Remora · Cari headset · langkah 7</span>
+        <div class="tab agent grouped step on"><span class="fav" style="background:#ee4d2d"><i></i></span><span class="t">headset bluetooth — Toko A</span></div>
+        <div class="tab agent grouped step" id="popupTab"><span class="fav" style="background:#7b61ff"><i></i></span><span class="t">Detail produk (dibuka dari link)</span></div>
+        <div class="tab agent grouped" id="dragTab" hidden><span class="fav" style="background:#f4b400"></span><span class="t">Perbandingan harga</span></div>
+      </div>
+      <div class="group" style="--gc:#1a73e8">
+        <span class="chip">Riset</span>
+        <div class="tab user grouped"><span class="fav" style="background:#999"></span><span class="t">Artikel milik user</span></div>
+      </div>
+    </div>
+    <div class="toolbar">
+      <span class="url">toko-a.example/search?q=headset+bluetooth</span>
+      <span class="ext" title="Remora"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5" fill="#2dd4bf"/></svg><span class="badge" id="badge">AI</span></span>
+    </div>
+    <div class="viewport">
+      <div class="sk" style="left:24px;top:24px;width:220px;height:16px"></div>
+      <div class="sk" style="left:24px;top:56px;width:420px;height:110px"></div>
+      <div class="sk" style="left:460px;top:56px;width:180px;height:110px"></div>
+      <div class="pill"><span class="d"></span><span><span>Remora · agent bekerja — Cari headset</span><span class="l2">langkah 7 · 01:12 · klik "Urutkan: termurah"</span></span></div>
+    </div>
+  </section>
+
+  <div class="two">
+    <section>
+      <h2 class="sec">State grup</h2>
+      <table>
+        <thead><tr><th>State</th><th>Warna</th><th>Judul grup</th><th>Kapan</th></tr></thead>
+        <tbody>
+          <tr><td>siap</td><td><span class="sw" style="background:var(--g-grey)"></span>grey</td><td>🤖 Remora · siap</td><td>grup dibuat tanpa tugas, atau ±4–6 dtk setelah tugas berakhir</td></tr>
+          <tr><td>berjalan</td><td><span class="sw" style="background:var(--g-cyan)"></span>cyan</td><td>🤖 Remora · &lt;label&gt; · langkah N</td><td>tiap tool; judul diperbarui paling cepat tiap 3 dtk</td></tr>
+          <tr><td>selesai</td><td><span class="sw" style="background:var(--g-green)"></span>green</td><td>🤖 Remora · &lt;label&gt; · selesai ✓</td><td><code>task_end</code>, ±4 dtk lalu siap</td></tr>
+          <tr><td>timeout</td><td><span class="sw" style="background:var(--g-orange)"></span>orange</td><td>🤖 Remora · berhenti tanpa sinyal</td><td>90 dtk tanpa tool, ±6 dtk lalu siap</td></tr>
+          <tr><td>putus</td><td><span class="sw" style="background:var(--g-orange)"></span>orange</td><td>🤖 Remora · sesi ditutup</td><td>stdin MCP tertutup; akses dicabut seketika, ±6 dtk lalu grup dilepas</td></tr>
+        </tbody>
+      </table>
+    </section>
+    <section>
+      <h2 class="sec">User tetap berkuasa — coba</h2>
+      <div class="controls">
+        <div class="seg" role="group" aria-label="Simulasi">
+          <button id="dragIn">seret tab masuk grup</button>
+          <button id="dragOut">seret tab keluar grup</button>
+          <button id="touchUser">agent coba tab user</button>
+        </div>
+      </div>
+      <ol class="rules">
+        <li>Seret tab <b>masuk</b> ke grup = izin akses.</li>
+        <li>Seret <b>keluar</b>, ungroup, atau tutup grup = akses dicabut seketika.</li>
+        <li>Tab yang dibuka dari tab grup (<code>target=_blank</code>, <code>window.open</code>) ikut masuk grup.</li>
+        <li>Grup milik user (mis. "Riset") tetap terlarang.</li>
+      </ol>
+      <div class="verdict" id="verdict" aria-live="polite">—</div>
+    </section>
+  </div>
+
+  <h2 class="sec">Slop Diagnostic</h2>
+  <div class="slop">
+    <b>Skor: 1 / 10.</b> Tell yang menyala:
+    <ul>
+      <li><b>#9 Default type</b> — system-ui. Disengaja: mockup meniru chrome browser yang memakai font sistem; diterima.</li>
+    </ul>
+    Tidak menyala: gradient, aksen indigo, grid fitur, rel-kiri, blur, angka monumen, ikon-topper, center stack, wrong surface
+    (Operate: tab strip nyata + tabel state padat). Emoji 🤖 hanya ada di judul grup karena itu teks produk, bukan dekorasi.
+  </div>
+</main>
+<script>
+  const frame = document.getElementById('frame');
+  const chip = document.getElementById('chip');
+  const badge = document.getElementById('badge');
+  const hint = document.getElementById('hint');
+  const verdict = document.getElementById('verdict');
+  const dragTab = document.getElementById('dragTab');
+  const STATES = {
+    ready:    { chip: '🤖 Remora · siap', badge: '', hint: 'Grup ada, tidak ada tugas. Akses tetap hidup.' },
+    running:  { chip: '🤖 Remora · Cari headset · langkah 7', badge: 'AI', hint: 'Cyan: agent sedang bekerja.' },
+    done:     { chip: '🤖 Remora · Cari headset · selesai ✓', badge: 'OK', hint: 'Grup TIDAK dilepas saat task_end.' },
+    timeout:  { chip: '🤖 Remora · berhenti tanpa sinyal', badge: '!', hint: '90 dtk tanpa tool. Sesi masih hidup.' },
+    aborted:  { chip: '🤖 Remora · sesi ditutup', badge: '!', hint: 'Akses sudah dicabut; grup dilepas ±6 dtk lagi.' },
+    released: { chip: '', badge: '', hint: 'Grup dilepas: tab jadi tab biasa, agent tidak punya akses.' },
+  };
+  function setState(s) {
+    frame.dataset.s = s;
+    chip.textContent = STATES[s].chip;
+    badge.textContent = STATES[s].badge;
+    hint.textContent = STATES[s].hint;
+    document.querySelectorAll('[data-state]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.state === s)));
+    try { localStorage.setItem('remora-group-state', s); } catch {}
+  }
+  document.querySelectorAll('[data-state]').forEach(b => b.addEventListener('click', () => setState(b.dataset.state)));
+  document.getElementById('dragIn').onclick = () => {
+    dragTab.hidden = false;
+    verdict.innerHTML = '<b class="ok">izin</b> tab "Perbandingan harga" masuk grup → muncul di tabs_list sesi ini';
+  };
+  document.getElementById('dragOut').onclick = () => {
+    dragTab.hidden = true;
+    verdict.innerHTML = '<b class="no">dicabut</b> snapshot(tab "Perbandingan harga") → OUT_OF_GROUP';
+  };
+  document.getElementById('touchUser').onclick = () => {
+    verdict.innerHTML = '<b class="no">ditolak</b> click(tab "Kotak masuk") → OUT_OF_GROUP: tab di luar grup Remora milik sesi ini; buat tab dengan tab_create';
+  };
+  let saved = 'running';
+  try { saved = localStorage.getItem('remora-group-state') || saved; } catch {}
+  setState(STATES[saved] ? saved : 'running');
+</script>
+</body>
+</html>

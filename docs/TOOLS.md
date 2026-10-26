@@ -1,25 +1,32 @@
 # Katalog MCP Tools Remora
 
-58 tools. Semua argumen `tabId` opsional (default: tab aktif). Semua target
-elemen memakai `ref` (dari `snapshot`, disarankan) atau `selector` (CSS,
-fallback). Setiap tool yang menyentuh tab memicu indikator agent aktif
-(pill + badge + prefix judul).
+56 tools. Semua argumen `tabId` opsional (default: **working tab di grup
+sesi ini**, bukan tab aktif window). Semua target elemen memakai `ref` (dari
+`snapshot`, disarankan) atau `selector` (CSS, fallback). Setiap tool yang
+menyentuh tab memicu indikator agent aktif (judul grup + pill + badge +
+prefix judul).
 
-## Klaim tab (multi-agent)
+## Isolasi tab: grup per sesi
 
-Setiap sesi agent punya identitas sendiri. Tab yang dibuat otomatis diklaim
-pemiliknya; tool yang MENGUBAH tab milik sesi lain gagal cepat dengan error
-`TAB_CLAIMED` yang menyebut pemiliknya. Tool baca (snapshot, screenshot,
-page_text, …) selalu lolos.
+Setiap sesi agent (satu proses MCP = satu `agentId`) punya **satu Chrome Tab
+Group** sendiri, judul `🤖 Remora · <label> · langkah N`. Aturan keras,
+ditegakkan di extension dan divalidasi ulang di MCP server:
 
-| Tool | Argumen | Deskripsi |
-|---|---|---|
-| `tab_claim` | `tabId?`, `note?` | Klaim tab untuk sesi ini (eksklusif). |
-| `tab_release` | `tabId?` | Lepas klaim tab. |
+- Agent hanya bisa menyentuh tab di dalam grupnya. Tab lain — milik user,
+  di grup user, atau di grup sesi lain — ditolak dengan `OUT_OF_GROUP`,
+  termasuk untuk tool baca (`snapshot`, `screenshot`, `page_text`, …).
+- Grup dibuat otomatis oleh `tab_create` pertama. Tanpa tab di grup, tool
+  tanpa `tabId` gagal dan menyuruh memanggil `tab_create`.
+- Tab yang dibuka dari tab grup (`target=_blank`, `window.open`) ikut masuk
+  grup. User yang menyeret tab **masuk** grup memberi izin; menyeret
+  **keluar**, ungroup, atau menutup grup mencabut akses seketika.
+- `tabs_list` hanya berisi tab grup ini; `remora_status` hanya menyebut
+  jumlah tab lain ("N tab lain disembunyikan").
+- Grup bertahan selama sesi hidup (tidak dilepas saat `task_end`), dan
+  dilepas saat proses MCP berhenti atau semua tabnya ditutup.
 
-`tabs_list` menandai tab yang diklaim (`claimedBy`, `claimNote`,
-`claimedByMe`); `remora_status` mengembalikan daftar `claims` aktif.
-Klaim hilang saat tab ditutup atau sesi pemiliknya berhenti.
+Warna grup: cyan = berjalan, green = selesai (±4 dtk), orange = timeout /
+sesi ditutup (±6 dtk), grey = siap.
 
 Konvensi respons: JSON. `screenshot`/`screenshot_annotated` mengembalikan
 gambar + metadata ringkas.
@@ -28,7 +35,7 @@ gambar + metadata ringkas.
 
 | Tool | Deskripsi |
 |---|---|
-| `remora_status` | Status bridge: extension terhubung?, versi, jumlah tab, tab aktif agent. |
+| `remora_status` | Status bridge: extension terhubung?, versi, `agentId`, grup sesi ini (`group`), jumlah tab lain yang disembunyikan (`hiddenTabs`), aksi terakhir di tab grup. |
 | `task_begin` | Umumkan tugas mulai (`label?`, maks 60 karakter). Indikator menyala sampai `task_end`. |
 | `task_end` | Umumkan tugas selesai. Panggil sebelum jawaban akhir; tanpa ini indikator baru padam setelah 90 detik dan tampil sebagai "berhenti tanpa sinyal selesai". |
 
@@ -36,15 +43,15 @@ gambar + metadata ringkas.
 
 | Tool | Argumen | Deskripsi |
 |---|---|---|
-| `tabs_list` | — | Semua tab (id, title, url, active, pinned). |
-| `tab_activate` | `tabId` | Fokuskan tab. |
-| `tab_create` | `url?`, `active?` | Tab baru, opsional langsung buka URL. |
-| `tab_close` | `tabId?` | Tutup tab (default aktif). |
-| `tab_duplicate` | `tabId?` | Duplikat tab. |
-| `tab_pin` | `tabId?`, `pinned` | Pin/unpin. |
+| `tabs_list` | — | Tab di grup sesi ini saja (id, title, url, active, pinned, groupId). |
+| `tab_activate` | `tabId` | Fokuskan tab grup. |
+| `tab_create` | `url?`, `active?` | Tab baru **di dalam grup sesi** (grup dibuat saat pertama). Satu-satunya cara mendapat tab kerja. |
+| `tab_close` | `tabId?` | Tutup tab grup (default working tab). |
+| `tab_duplicate` | `tabId?` | Duplikat tab grup; salinannya ikut grup. |
+| `tab_pin` | `tabId?`, `pinned` | Unpin saja. `pinned: true` ditolak: Chrome mengeluarkan tab yang di-pin dari grupnya. |
 | `tab_mute` | `tabId?`, `muted` | Mute/unmute. |
-| `tab_move` | `tabId?`, `index`, `windowId?` | Pindah posisi/window. |
-| `windows_list` | — | Daftar window (id, focused, jumlah tab). |
+| `tab_move` | `tabId?`, `index`, `windowId?` | Urutkan ulang di dalam grup (index dijepit ke rentang grup). Pindah ke window lain ditolak. |
+| `windows_list` | — | Hanya window yang memuat grup sesi (tabCount = jumlah tab grup). |
 
 ## Navigasi
 
@@ -104,8 +111,8 @@ snapshot({}) → baca hasil
 
 | Tool | Argumen | Deskripsi |
 |---|---|---|
-| `clipboard_read` | — | Baca clipboard OS (butuh halaman fokus). |
-| `clipboard_write` | `text` | Tulis clipboard OS. |
+| `clipboard_read` | — | Baca clipboard OS. Hanya saat tab aktif = tab grup sesi ini. |
+| `clipboard_write` | `text` | Tulis clipboard OS. Syarat sama. |
 | `clipboard_copy_from` | target | Salin teks elemen ke clipboard. |
 | `clipboard_paste_to` | target + `filePath?` | Paste: teks clipboard, atau **file lokal sebagai paste** (tanpa dialog). |
 
@@ -121,9 +128,9 @@ snapshot({}) → baca hasil
 | Tool | Argumen | Deskripsi |
 |---|---|---|
 | `evaluate_js` | `tabId?`, `expression`, `timeoutMs?` | Eval JS di ISOLATED world (akses DOM, bukan variabel page). **Default OFF** — aktifkan di popup. |
-| `cookies_list` | `url?` | Daftar cookies. |
-| `cookies_set` | `url`, `name`, `value`, `expirationDate?` | Set cookie. |
-| `cookies_clear` | `url?` | Hapus cookies. |
+| `cookies_list` | `url?` | Cookies untuk situs yang terbuka di grup (tanpa `url` = semua tab grup; `url` lain ditolak `OUT_OF_GROUP`). |
+| `cookies_set` | `url`, `name`, `value`, `expirationDate?` | Set cookie, hanya untuk situs yang terbuka di grup. |
+| `cookies_clear` | `url?` | Hapus cookies situs di grup. |
 | `storage_get` | `tabId?`, `area` (`local`/`session`), `keys?` | Baca storage (tanpa `keys` = semua). |
 | `storage_set` | `tabId?`, `area`, `entries?`, `remove?` | Tulis/hapus storage. |
 
@@ -134,7 +141,7 @@ snapshot({}) → baca hasil
 | `net_capture_start` | `tabId?`, `urlPattern?` | Mulai rekam request. **Default OFF** — aktifkan di popup. |
 | `net_capture_stop` | `tabId?` | Berhenti merekam. |
 | `net_capture_get` | `tabId?`, `clear?` | Ambil hasil (method, url, status, durasi). |
-| `net_block` | `enabled`, `patterns[]?` | Blokir request via pola substring URL. `patterns` wajib saat `enabled: true`, boleh dikosongkan saat mematikan. Diterapkan lewat `declarativeNetRequest` (bukan blocking `webRequest`, yang dilarang MV3). |
+| `net_block` | `enabled`, `patterns[]?` | Blokir request via pola substring URL **hanya di tab grup sesi**. `patterns` wajib saat `enabled: true`. Diterapkan lewat session rule `declarativeNetRequest` ber-`tabIds`; hilang bersama grup. |
 
 ## File & Upload (tanpa dialog Explorer)
 
@@ -146,7 +153,7 @@ di-inject langsung ke `<input type=file>` atau dropzone.
 | `upload_file` | target + `filePath` (absolut) | Upload 1 file ke input file. |
 | `upload_files` | target + `filePaths[]` (maks 10) | Upload banyak file ke 1 input. |
 | `drag_drop_files` | target + `filePaths[]` (maks 10) | Drop file ke dropzone. |
-| `downloads_list` | `limit?` | Unduhan terbaru. |
+| `downloads_list` | `limit?` | Unduhan yang dimulai situs di grup selama sesi ini. |
 
 Batas: ±200MB per file; >50MB otomatis chunking dengan progress.
 Contoh:
@@ -162,3 +169,5 @@ upload_file({ selector: "input[type=file]", filePath: "D:/docs/laporan.pdf" })
 - `cannot be automated` → halaman browser-internal; navigasi ke web biasa.
 - `NOT_ALLOWED` → cek toggle popup (JS eval / network capture).
 - `SITE_BLOCKED` → user memblokir situs; berhenti dan beri tahu user.
+- `OUT_OF_GROUP` → "tab di luar grup Remora milik sesi ini; buat tab dengan
+  tab_create". Pakai `tabs_list` untuk tab grup, atau `tab_create`.

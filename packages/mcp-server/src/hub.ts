@@ -3,6 +3,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import {
   ExtensionHelloPayloadSchema,
   NavigatedPayloadSchema,
+  SessionEndPayloadSchema,
   TabClosedPayloadSchema,
   TaskEndPayloadSchema,
   TaskSnapshotSchema,
@@ -20,7 +21,6 @@ import {
 } from "@remora/protocol";
 import { markActive, markClosed } from "./activity.js";
 import { TaskTracker, type TaskEnded, type TaskSnapshot } from "./tasks.js";
-import { ClaimStore, ClaimSnapshot, TabClaim } from "./claims.js";
 
 function sameToken(a: string, b: string): boolean {
   const x = Buffer.from(a);
@@ -64,6 +64,8 @@ function isAddressInUse(err: unknown): boolean {
   return code === "EADDRINUSE" || /EADDRINUSE/.test(String((err as Error | undefined)?.message ?? ""));
 }
 
+const PEER_GONE_GRACE_MS = 5000;
+
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export class RemoraHub {
@@ -74,24 +76,20 @@ export class RemoraHub {
   private heartbeat: NodeJS.Timeout | null = null;
   private log: (msg: string) => void;
 
-  /** Stable id for this MCP process, so claims can name their owner. */
+  /** Stable id for this MCP process; the extension scopes tab access to its group. */
   readonly agentId: string;
-  /** Short human label shown to other agents on claimed tabs. */
+  /** Short human label for logs and status. */
   readonly ownerLabel: string;
-  private claims = new ClaimStore();
   readonly tasks = new TaskTracker((ended) => this.emitTaskEnd(ended));
 
-  /**
-   * This session's working tab: set by tab_create/tab_duplicate/tab_claim
-   * (and any explicit-tabId mutation). Calls without tabId resolve here
-   * first instead of the window-active tab, so concurrent sessions stop
-   * stealing each other's focus and spawning tabs.
-   */
-  private workingTab: number | undefined;
+  /** This session's Remora tab group as last reported by the extension. */
+  groupId: number | undefined;
 
   private mode: HubMode = "server";
   private control: WebSocket | null = null;
   private peers = new Set<WebSocket>();
+  /** Agent id each attached peer speaks for, learned from its requests. */
+  private peerAgents = new Map<WebSocket, string>();
   private peerState: { connected: boolean; extension: ExtensionInfo | null } = {
     connected: false,
     extension: null,
@@ -119,163 +117,6 @@ export class RemoraHub {
     return this.mode === "server";
   }
 
-  // -- tab claims -------------------------------------------------------------
-
-  /** Naming shown to other agents, e.g. `ZCode abc123` or `agent 1a2b3c`. */
-  get claimOwnerLabel(): string {
-    return this.ownerLabel;
-  }
-
-  get claimStore(): ClaimStore {
-    return this.claims;
-  }
-
-  /** Active claims (primary: authoritative; peer: last broadcast snapshot). */
-  listClaims(): TabClaim[] {
-    return this.claims.list();
-  }
-
-  /** This session's working tab (may be undefined before first use). */
-  myWorkingTab(): number | undefined {
-    return this.workingTab;
-  }
-
-  setWorkingTab(tabId: number): void {
-    this.workingTab = tabId;
-  }
-
-  /** Forget the working tab, but only if it is the given one. */
-  clearWorkingTab(tabId: number): void {
-    this.forgetWorkingTab(tabId);
-  }
-
-  private forgetWorkingTab(tabId: number): void {
-    if (this.workingTab === tabId) this.workingTab = undefined;
-  }
-
-  /** Drop claims for tabs that no longer exist; broadcast the trim. */
-  pruneClaims(knownTabIds: Set<number> | number[]): number[] {
-    if (this.mode !== "server") return [];
-    const dropped = this.claims.prune(knownTabIds);
-    if (dropped.length > 0) this.broadcastClaims();
-    return dropped;
-  }
-
-  private claimedError(claim: TabClaim): WireError {
-    const who = claim.ownerLabel ? ` by ${claim.ownerLabel}` : "";
-    const what = claim.note ? ` (${claim.note})` : "";
-    return {
-      code: "TAB_CLAIMED",
-      message: `Tab ${claim.tabId} is claimed${who}${what}. Pick another tab (call tabs_list), or ask the user.`,
-    };
-  }
-
-  /**
-   * Guard a mutating request. Resolves the effective tab (explicit tabId, or
-   * the active tab via the extension) and rejects with TAB_CLAIMED when
-   * another agent owns it. Returns the resolved tabId, or the raw guard
-   * result when the resolution itself went wrong.
-   */
-  async guardTab(tabId?: number): Promise<number | undefined> {
-    // This session already has a working tab and the call is implicit: stay
-    // there. (Explicit tabId still goes through the claim check below.)
-    if (tabId === undefined && this.workingTab !== undefined) {
-      const verdict = this.mode === "peer"
-        ? await this.checkViaPrimary(this.workingTab)
-        : this.claims.check(this.workingTab, this.agentId);
-      if (!verdict.allowed) throw this.claimedError(verdict.claim);
-      return this.workingTab;
-    }
-    // Peers ask the primary so the verdict is always authoritative — no
-    // race with the claim broadcast.
-    if (this.mode === "peer") return this.guardViaPrimary(tabId);
-    if (tabId !== undefined) {
-      const verdict = this.claims.check(tabId, this.agentId);
-      if (!verdict.allowed) throw this.claimedError(verdict.claim);
-      return tabId;
-    }
-    // No explicit tab: mutation would land on the active tab. Block only if
-    // the active tab is claimed by someone else; leave the extension call to
-    // fail naturally when the tab cannot be determined.
-    try {
-      const tabs = await this.request<Array<{ id?: number; active?: boolean }>>("tabs.list", {});
-      const active = tabs.find((t) => t.active);
-      if (active && typeof active.id === "number") {
-        const verdict = this.claims.check(active.id, this.agentId);
-        if (!verdict.allowed) throw this.claimedError(verdict.claim);
-        return active.id;
-      }
-    } catch (err) {
-      if ((err as WireError | undefined)?.code === "TAB_CLAIMED") throw err;
-      // Extension unreachable etc. — let the real call surface the error.
-    }
-    return undefined;
-  }
-
-  /**
-   * Peer-side guard: ask the primary for an authoritative verdict (also
-   * resolves the implicit active tab there). Falls back to the cached
-   * snapshot when the hub link is down — the real extension call then fails
-   * with the link error as before.
-   */
-  private async guardViaPrimary(tabId?: number): Promise<number | undefined> {
-    try {
-      const verdict = await this.controlCall<{ allowed: boolean; claim?: TabClaim; activeId?: number }>(
-        "guard",
-        tabId !== undefined ? { tabId } : {},
-      );
-      if (!verdict.allowed && verdict.claim) throw this.claimedError(verdict.claim);
-      return tabId ?? verdict.activeId;
-    } catch (err) {
-      if ((err as WireError | undefined)?.code === "TAB_CLAIMED") throw err;
-      return this.guardFromCache(tabId);
-    }
-  }
-
-  /**
-   * Check one explicit tab against the primary (peer fast-path for the
-   * working-tab shortcut). Falls back to the cached snapshot when the hub
-   * link is down; rethrows TAB_CLAIMED either way.
-   */
-  private async checkViaPrimary(
-    tabId: number,
-  ): Promise<{ allowed: true } | { allowed: false; claim: TabClaim }> {
-    try {
-      const verdict = await this.controlCall<{ allowed: boolean; claim?: TabClaim }>(
-        "guard",
-        { tabId },
-      );
-      if (!verdict.allowed && verdict.claim) return { allowed: false, claim: verdict.claim };
-      return { allowed: true };
-    } catch (err) {
-      if ((err as { code?: string; claim?: TabClaim }).code === "TAB_CLAIMED") {
-        const claim = (err as { claim?: TabClaim }).claim ?? this.claims.get(tabId);
-        if (claim) return { allowed: false, claim };
-      }
-      return this.claims.check(tabId, this.agentId);
-    }
-  }
-
-  private async guardFromCache(tabId?: number): Promise<number | undefined> {
-    if (tabId !== undefined) {
-      const verdict = this.claims.check(tabId, this.agentId);
-      if (!verdict.allowed) throw this.claimedError(verdict.claim);
-      return tabId;
-    }
-    try {
-      const tabs = await this.request<Array<{ id?: number; active?: boolean }>>("tabs.list", {});
-      const active = tabs.find((t) => t.active);
-      if (active && typeof active.id === "number") {
-        const verdict = this.claims.check(active.id, this.agentId);
-        if (!verdict.allowed) throw this.claimedError(verdict.claim);
-        return active.id;
-      }
-    } catch (err) {
-      if ((err as WireError | undefined)?.code === "TAB_CLAIMED") throw err;
-    }
-    return undefined;
-  }
-
   async start(): Promise<void> {
     this.stopped = false;
     try {
@@ -289,30 +130,14 @@ export class RemoraHub {
   }
 
   async stop(): Promise<void> {
-    // Before teardown, so the notification can still reach the extension.
+    // Before teardown, so the notifications can still reach the extension.
     this.tasks.end("aborted");
+    this.notify("session.end", { agentId: this.agentId });
     this.stopped = true;
     if (this.reattachTimer) clearTimeout(this.reattachTimer);
     this.reattachTimer = null;
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.heartbeat = null;
-    // A dying session must not hold tabs hostage: drop its own claims and
-    // tell the other side (primary broadcasts, peer asks the primary).
-    if (this.mode === "server") {
-      if (this.claims.clearMine(this.agentId).length > 0) this.broadcastClaims();
-    } else {
-      for (const c of this.claims.list()) {
-        if (c.agentId === this.agentId && this.control?.readyState === WebSocket.OPEN) {
-          this.control.send(
-            JSON.stringify({
-              id: randomUUID(),
-              method: "claims.release",
-              params: { tabId: c.tabId, agentId: this.agentId, ownerLabel: this.ownerLabel },
-            }),
-          );
-        }
-      }
-    }
     this.failAllPending({ code: "INTERNAL", message: "hub shutting down" });
     this.control?.close();
     this.control = null;
@@ -504,38 +329,59 @@ export class RemoraHub {
         return;
       }
       if (frame.kind === "request") {
-        const { id, method, params } = frame.value;
-        if (method === "claims.claim" || method === "claims.release" || method === "claims.guard") {
-          void this.handleClaimOp(ws, id, method, params);
+        const { id, method, params, agentId } = frame.value;
+        if (!agentId) {
+          ws.send(JSON.stringify({ id, ok: false, error: { code: "BAD_ARGS", message: "agentId missing" } }));
           return;
         }
-        this.request(method as WireMethodName, params)
+        this.peerAgents.set(ws, agentId);
+        this.forward(method as WireMethodName, params, agentId)
           .then((result) => ws.send(JSON.stringify({ id, ok: true, result })))
           .catch((error) => ws.send(JSON.stringify({ id, ok: false, error })));
         return;
       }
-      if (frame.kind === "notification" && frame.value.notification === "activity.show") {
-        const p = frame.value.payload as { tabId?: unknown; action?: unknown; target?: unknown; task?: unknown };
-        if (typeof p?.tabId === "number" && typeof p.action === "string") {
+      if (frame.kind !== "notification") return;
+      const { notification, payload } = frame.value;
+      if (notification === "activity.show") {
+        const p = payload as { tabId?: unknown; action?: unknown; target?: unknown; task?: unknown; agentId?: unknown };
+        if (typeof p?.tabId === "number" && typeof p.action === "string" && typeof p.agentId === "string") {
           const parsed = TaskSnapshotSchema.safeParse(p.task);
           this.showActivity(
             p.tabId,
             p.action,
             typeof p.target === "string" ? p.target : undefined,
             parsed.success ? parsed.data : undefined,
+            p.agentId,
           );
         }
-      }
-      if (frame.kind === "notification" && frame.value.notification === "task.end") {
-        const parsed = TaskEndPayloadSchema.safeParse(frame.value.payload);
+      } else if (notification === "task.end") {
+        const parsed = TaskEndPayloadSchema.safeParse(payload);
         if (parsed.success) this.notify("task.end", parsed.data);
+      } else if (notification === "session.end") {
+        const parsed = SessionEndPayloadSchema.safeParse(payload);
+        if (parsed.success) this.notify("session.end", parsed.data);
       }
     });
-    ws.on("close", () => {
-      this.peers.delete(ws);
-      this.log("peer MCP process detached");
-    });
-    ws.on("error", () => this.peers.delete(ws));
+    ws.on("close", () => this.dropPeer(ws));
+    ws.on("error", () => this.dropPeer(ws));
+  }
+
+  /**
+   * A peer that vanished without `session.end` (crash, kill) would keep its
+   * group forever. Release it unless the same agent re-attaches shortly:
+   * peers reconnect within ~1s after a hub handover.
+   */
+  private dropPeer(ws: WebSocket): void {
+    if (!this.peers.delete(ws)) return;
+    this.log("peer MCP process detached");
+    const agentId = this.peerAgents.get(ws);
+    this.peerAgents.delete(ws);
+    if (!agentId) return;
+    const timer = setTimeout(() => {
+      if (this.stopped || [...this.peerAgents.values()].includes(agentId)) return;
+      this.notify("session.end", { agentId });
+    }, PEER_GONE_GRACE_MS);
+    timer.unref?.();
   }
 
   private sendState(ws: WebSocket): void {
@@ -543,8 +389,8 @@ export class RemoraHub {
     ws.send(JSON.stringify({ event: "state", payload: this.statePayload() }));
   }
 
-  private statePayload(): { connected: boolean; extension: ExtensionInfo | null; claims: ClaimSnapshot[] } {
-    return { connected: this.connected, extension: this.extension, claims: this.claims.snapshot() };
+  private statePayload(): { connected: boolean; extension: ExtensionInfo | null } {
+    return { connected: this.connected, extension: this.extension };
   }
 
   private broadcastState(): void {
@@ -642,76 +488,9 @@ export class RemoraHub {
 
   private applyState(payload: unknown): void {
     const p = payload as
-      | { connected?: unknown; extension?: ExtensionInfo | null; claims?: ClaimSnapshot[] }
+      | { connected?: unknown; extension?: ExtensionInfo | null }
       | undefined;
     this.peerState = { connected: p?.connected === true, extension: p?.extension ?? null };
-    if (Array.isArray(p?.claims)) this.claims.applySnapshot(p.claims);
-  }
-
-  /**
-   * Primary-side claim op from a peer. The peer identifies itself by its
-   * agentId + ownerLabel; the claim is recorded under that identity so the
-   * TAB_CLAIMED message names the right owner.
-   */
-  private async handleClaimOp(
-    ws: WebSocket,
-    id: string,
-    method: string,
-    params: unknown,
-  ): Promise<void> {
-    const p = params as { tabId?: unknown; note?: unknown; agentId?: unknown; ownerLabel?: unknown };
-    const tabId = p?.tabId;
-    const peerId = typeof p?.agentId === "string" && p.agentId ? p.agentId : "peer";
-    const peerLabel = typeof p?.ownerLabel === "string" && p.ownerLabel ? p.ownerLabel : peerId;
-    const reply = (ok: boolean, result?: unknown, error?: WireError) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ id, ok, result, error }));
-    };
-    if (method === "claims.guard") {
-      // No tabId: resolve the active tab via the extension first.
-      let target = typeof tabId === "number" ? tabId : undefined;
-      if (target === undefined) {
-        try {
-          const tabs = await this.request<Array<{ id?: number; active?: boolean }>>("tabs.list", {});
-          target = tabs.find((t) => t.active)?.id;
-        } catch {
-          reply(true, { allowed: true });
-          return;
-        }
-        if (target === undefined) {
-          reply(true, { allowed: true });
-          return;
-        }
-      }
-      const verdict = this.claims.check(target, peerId);
-      if (!verdict.allowed) {
-        reply(false, undefined, this.claimedError(verdict.claim));
-        return;
-      }
-      reply(true, { allowed: true, activeId: target });
-      return;
-    }
-    if (typeof tabId !== "number" || !Number.isInteger(tabId)) {
-      reply(false, undefined, { code: "BAD_ARGS", message: "tabId must be an integer" });
-      return;
-    }
-    try {
-      if (method === "claims.claim") {
-        const note = typeof p?.note === "string" ? p.note : undefined;
-        const claim = this.claims.claim(tabId, peerId, peerLabel, note);
-        this.broadcastClaims();
-        reply(true, claim);
-      } else {
-        const done = this.claims.release(tabId, peerId);
-        if (done) this.broadcastClaims();
-        reply(true, done);
-      }
-    } catch {
-      const existing = this.claims.get(tabId);
-      reply(false, undefined, existing ? this.claimedError(existing) : {
-        code: "INTERNAL",
-        message: "could not update claim",
-      });
-    }
   }
 
   private wireControl(ws: WebSocket): void {
@@ -728,11 +507,6 @@ export class RemoraHub {
       }
       if (frame.kind === "event" && frame.value.event === "state") {
         this.applyState(frame.value.payload);
-        return;
-      }
-      if (frame.kind === "event" && frame.value.event === "claims") {
-        const entries = frame.value.payload;
-        if (Array.isArray(entries)) this.claims.applySnapshot(entries as ClaimSnapshot[]);
         return;
       }
       if (frame.kind === "event" && frame.value.event === "activity") {
@@ -776,86 +550,8 @@ export class RemoraHub {
     this.reattachTimer.unref?.();
   }
 
-  // -- claim operations (primary authoritative, peer via control) -------------
-
-  /**
-   * Claim a tab for this session. On the primary this writes the store
-   * directly and broadcasts; on a peer it asks the primary over the control
-   * channel (which enforces and broadcasts the same way).
-   */
-  async claimTab(tabId: number, note?: string): Promise<TabClaim> {
-    if (this.mode === "peer") {
-      return this.controlCall<TabClaim>("claim", { tabId, note });
-    }
-    try {
-      const claim = this.claims.claim(tabId, this.agentId, this.ownerLabel, note);
-      this.broadcastClaims();
-      return claim;
-    } catch {
-      const existing = this.claims.get(tabId);
-      if (existing) throw this.claimedError(existing);
-      throw { code: "INTERNAL", message: "could not claim tab" } satisfies WireError;
-    }
-  }
-
-  async releaseTab(tabId: number): Promise<boolean> {
-    if (this.mode === "peer") {
-      return this.controlCall<boolean>("release", { tabId });
-    }
-    try {
-      const done = this.claims.release(tabId, this.agentId);
-      if (done) this.broadcastClaims();
-      return done;
-    } catch {
-      const existing = this.claims.get(tabId);
-      if (existing) throw this.claimedError(existing);
-      throw { code: "INTERNAL", message: "could not release tab" } satisfies WireError;
-    }
-  }
-
-  private controlCall<T>(op: string, payload: Record<string, unknown>): Promise<T> {
-    const ws = this.control;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      return Promise.reject({
-        code: "NO_EXTENSION",
-        message: "Remora hub link is down; reconnecting to the hub.",
-      } satisfies WireError);
-    }
-    const id = randomUUID();
-    const body = { ...payload, agentId: this.agentId, ownerLabel: this.ownerLabel };
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject({ code: "TIMEOUT", message: `hub did not answer ${op} in time` } satisfies WireError);
-      }, 10_000);
-      timer.unref?.();
-      this.pending.set(id, { resolve: (v) => resolve(v as T), reject, timer });
-      ws.send(JSON.stringify({ id, method: `claims.${op}`, params: body }), (err) => {
-        if (!err) return;
-        this.pending.delete(id);
-        clearTimeout(timer);
-        reject({ code: "INTERNAL", message: `send failed: ${String(err)}` } satisfies WireError);
-      });
-    });
-  }
-
-  private broadcastClaims(): void {
-    const snapshot = this.claims.snapshot();
-    this.broadcastToPeers({ event: "claims", payload: snapshot });
-  }
-
   private onTabClosed(tabId: number): void {
     markClosed(tabId);
-    this.forgetWorkingTab(tabId);
-    if (this.mode === "server") {
-      if (this.claims.get(tabId)) {
-        this.claims.remove(tabId);
-        this.broadcastClaims();
-      }
-    } else {
-      // Peers drop their cached entry; primary broadcasts authoritatively.
-      this.claims.remove(tabId);
-    }
   }
 
   private failAllPending(err: WireError): void {
@@ -866,10 +562,19 @@ export class RemoraHub {
     this.pending.clear();
   }
 
-  /** Send a request to the extension and await its response. */
+  /** Send a request to the extension, as this session, and await its response. */
   request<T = unknown>(
     method: WireMethodName,
     params?: unknown,
+    timeoutMs = WS_REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
+    return this.forward<T>(method, params, this.agentId, timeoutMs);
+  }
+
+  private forward<T = unknown>(
+    method: WireMethodName,
+    params: unknown,
+    agentId: string,
     timeoutMs = WS_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
     const check = validateMethodParams(method, params ?? {});
@@ -877,7 +582,7 @@ export class RemoraHub {
       return Promise.reject({ code: "BAD_ARGS", message: check.message } satisfies WireError);
     }
     if (this.mode === "peer") {
-      return this.requestViaControl<T>(method, params, timeoutMs);
+      return this.requestViaControl<T>(method, params, agentId, timeoutMs);
     }
     if (!this.connected || !this.socket) {
       return Promise.reject({
@@ -885,12 +590,13 @@ export class RemoraHub {
         message: "Chrome extension is not connected. Open Chrome with Remora installed and paired.",
       } satisfies WireError);
     }
-    return this.dispatch<T>(this.socket, method, params, timeoutMs);
+    return this.dispatch<T>(this.socket, method, params, agentId, timeoutMs);
   }
 
   private requestViaControl<T>(
     method: WireMethodName,
     params: unknown,
+    agentId: string,
     timeoutMs: number,
   ): Promise<T> {
     const ws = this.control;
@@ -900,13 +606,14 @@ export class RemoraHub {
         message: "Remora hub link is down; reconnecting to the hub.",
       } satisfies WireError);
     }
-    return this.dispatch<T>(ws, method, params, timeoutMs);
+    return this.dispatch<T>(ws, method, params, agentId, timeoutMs);
   }
 
   private dispatch<T>(
     ws: WebSocket,
     method: WireMethodName,
     params: unknown,
+    agentId: string,
     timeoutMs: number,
   ): Promise<T> {
     const id = randomUUID();
@@ -917,7 +624,7 @@ export class RemoraHub {
       }, timeoutMs);
       timer.unref?.();
       this.pending.set(id, { resolve: (v) => resolve(v as T), reject, timer });
-      ws.send(JSON.stringify({ id, method, params: params ?? {} }), (err) => {
+      ws.send(JSON.stringify({ id, method, params: params ?? {}, agentId }), (err) => {
         if (!err) return;
         this.pending.delete(id);
         clearTimeout(timer);
@@ -944,9 +651,9 @@ export class RemoraHub {
   }
 
   /** Tell the extension to render activity on a tab (pill + badge + title). */
-  showActivity(tabId: number, action: string, target?: string, task?: TaskSnapshot): void {
+  showActivity(tabId: number, action: string, target?: string, task?: TaskSnapshot, agentId = this.agentId): void {
     markActive(tabId, action, target);
-    this.notify("activity.show", { tabId, action, target, task });
+    this.notify("activity.show", { tabId, agentId, action, target, task });
   }
 
   /** This session's own tool call: counts as a task step, then renders. */
@@ -960,6 +667,7 @@ export class RemoraHub {
       markClosed(tabId);
       this.notify("task.end", {
         tabId,
+        agentId: this.agentId,
         outcome: ended.outcome,
         label: ended.label,
         steps: ended.steps,

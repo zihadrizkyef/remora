@@ -10,9 +10,9 @@ export interface RemoraConfig {
   configPath: string;
   /** True when the token was freshly generated on this run. */
   freshToken: boolean;
-  /** Stable id for this MCP process (claim owner). */
+  /** Stable id for this MCP process (owner of its Remora tab group). */
   agentId: string;
-  /** Short human label shown to other agents on claimed tabs. */
+  /** Short human label for logs and status. */
   ownerLabel: string;
 }
 
@@ -38,7 +38,7 @@ function readJsonFile(path: string): Record<string, unknown> | null {
  *
  * Each MCP *process* gets its own agent id: explicit REMORA_AGENT_ID wins,
  * else a fresh random one per process (never persisted — persisting it would
- * make every session share one identity and break claims). The owner label
+ * make every session share one identity and one tab group). The owner label
  * defaults to the client name when known (REMORA_CLIENT, e.g. `ZCode`).
  */
 export function loadConfig(): RemoraConfig {

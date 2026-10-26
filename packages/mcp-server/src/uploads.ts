@@ -100,6 +100,7 @@ export async function transferFile(
     for (let i = 0; i < file.chunks; i++) {
       const slice = file.data.subarray(i * UPLOAD_CHUNK_BYTES, (i + 1) * UPLOAD_CHUNK_BYTES);
       await hub.request("upload.chunk", {
+        tabId: target.tabId,
         transferId,
         index: i,
         base64: slice.toString("base64"),
@@ -107,13 +108,14 @@ export async function transferFile(
     }
     const method: WireMethodName = mode === "inject" ? "upload.inject" : "upload.drop";
     return await hub.request(method, {
+      tabId: target.tabId,
       transferId,
       ref: target.ref,
       selector: target.selector,
     });
   } catch (err) {
     try {
-      await hub.request("upload.abort", { transferId });
+      await hub.request("upload.abort", { tabId: target.tabId, transferId });
     } catch {
       /* best effort */
     }
