@@ -23,6 +23,28 @@ export const DEFAULT_WS_PORT = 47291;
 export const WS_PATH = "/remora";
 export const WS_HEARTBEAT_MS = 15_000;
 export const WS_REQUEST_TIMEOUT_MS = 60_000;
+/**
+ * The extension pings this often: Chrome only keeps an MV3 worker alive
+ * while WebSocket traffic flows at least every 30s.
+ */
+export const WS_PING_MS = 20_000;
+/** Either side drops a link that has been silent this long. */
+export const WS_STALE_MS = 45_000;
+
+/** Close codes the hub uses so the extension can tell the user why. */
+export const WS_CLOSE = {
+  REPLACED: 4000,
+  BAD_HELLO: 4002,
+  BAD_TOKEN: 4401,
+  UNKNOWN_PATH: 4404,
+  STALE: 4408,
+} as const;
+
+/** Short non-secret id of a token, so the user can compare both ends. */
+export async function tokenFingerprint(token: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return Array.from(new Uint8Array(digest).slice(0, 4), (b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 /**
  * The auth token travels in the WebSocket subprotocol list, not the URL:

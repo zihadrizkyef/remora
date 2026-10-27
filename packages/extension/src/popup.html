@@ -19,7 +19,7 @@
       <button class="btn btn-accent btn-sm" id="btn-reconnect" type="button">Reconnect</button>
     </div>
   </div>
-  <div class="banner">Koneksi ke MCP terputus. Pastikan server berjalan, lalu tekan Reconnect.</div>
+  <div class="banner" id="banner" role="status" aria-live="polite"><span id="banner-msg">Koneksi ke MCP terputus.</span><small id="banner-sub"></small></div>
 
   <div class="pop-body">
     <section class="sec" aria-label="Pairing">
@@ -38,7 +38,7 @@
         </div>
         <div class="card stack">
           <div class="token-row">
-            <input id="token" type="password" readonly value="" placeholder="Belum ada token — tekan Regenerate" aria-label="Token pairing">
+            <input id="token" type="password" value="" spellcheck="false" autocomplete="off" placeholder="Tempel token MCP server, lalu Enter" aria-label="Token pairing">
             <button class="icon-btn" id="btn-show" type="button" title="Tampilkan/sembunyikan token" aria-label="Tampilkan token">◉</button>
             <button class="icon-btn" id="btn-copy-token" type="button" title="Salin token" aria-label="Salin token">⧉</button>
           </div>
@@ -46,7 +46,7 @@
             <button class="btn btn-ghost" id="btn-copy-config" type="button">Copy MCP config JSON</button>
             <button class="btn btn-danger-ghost" id="btn-regen" type="button">Regenerate</button>
           </div>
-          <p class="hint">Token hanya tersimpan lokal (<code>127.0.0.1</code>). Regenerate memutus sesi lama.</p>
+          <p class="hint">Token harus sama dengan <code>REMORA_TOKEN</code> MCP server (atau <code>%APPDATA%\remora\config.json</code>). Tempel lalu Enter untuk menyimpan. Regenerate membuat token baru dan wajib dipasang ulang di MCP client.</p>
         </div>
       </div>
     </section>
@@ -88,7 +88,7 @@
 
   <div class="pop-foot">
     <a href="#" id="docs-link">Dokumentasi</a>
-    <span class="ws">ws <b id="ws-state">●</b> <span id="ws-addr">127.0.0.1:47291</span> · <span id="ws-lat">—</span></span>
+    <span class="ws">ws <b id="ws-state">●</b> <span id="ws-addr">127.0.0.1:47291</span> · <span id="ws-lat">—</span> · token <span id="ws-tok">—</span></span>
   </div>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>

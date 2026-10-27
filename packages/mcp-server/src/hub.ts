@@ -8,13 +8,16 @@ import {
   TaskEndPayloadSchema,
   TaskSnapshotSchema,
   UploadProgressPayloadSchema,
+  WS_CLOSE,
   WS_HEARTBEAT_MS,
   WS_PATH,
   WS_REQUEST_TIMEOUT_MS,
+  WS_STALE_MS,
   WS_SUBPROTOCOL,
   WireError,
   WireMethodName,
   parseWireFrame,
+  tokenFingerprint,
   tokenFromProtocols,
   tokenProtocols,
   validateMethodParams,
@@ -66,11 +69,16 @@ function isAddressInUse(err: unknown): boolean {
 
 const PEER_GONE_GRACE_MS = 5000;
 
+const SERVER_VERSION = "0.1.0";
+
+class BadTokenError extends Error {}
+
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export class RemoraHub {
   private wss: WebSocketServer | null = null;
   private socket: WebSocket | null = null;
+  private lastSeen = 0;
   private info: ExtensionInfo | null = null;
   private pending = new Map<string, Pending>();
   private heartbeat: NodeJS.Timeout | null = null;
@@ -95,6 +103,8 @@ export class RemoraHub {
     extension: null,
   };
   private stopped = false;
+  /** Fingerprint of the hub token, shown to the user to spot pairing mismatches. */
+  tokenId = "";
   private reattachTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly opts: { port: number; token: string; agentId?: string; ownerLabel?: string }) {
@@ -119,6 +129,7 @@ export class RemoraHub {
 
   async start(): Promise<void> {
     this.stopped = false;
+    this.tokenId = await tokenFingerprint(this.opts.token);
     try {
       await this.startServer();
       this.log(`listening on 127.0.0.1:${this.opts.port}${WS_PATH}`);
@@ -194,9 +205,17 @@ export class RemoraHub {
     );
     wss.on("error", (err) => this.log(`server error: ${String(err)}`));
     this.heartbeat = setInterval(() => {
-      if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-        this.socket.send(JSON.stringify({ event: "heartbeat" }));
+      const ws = this.socket;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      // A suspended or crashed worker never sends a close frame; drop the
+      // dead link so the next tool call fails fast with NO_EXTENSION.
+      if (Date.now() - this.lastSeen > WS_STALE_MS) {
+        this.log("extension silent too long, dropping link");
+        ws.close(WS_CLOSE.STALE, "stale");
+        setTimeout(() => ws.terminate(), 1000).unref?.();
+        return;
       }
+      ws.send(JSON.stringify({ event: "heartbeat" }));
     }, WS_HEARTBEAT_MS);
     this.heartbeat.unref?.();
   }
@@ -204,8 +223,8 @@ export class RemoraHub {
   private handleConnection(ws: WebSocket, url: string, token: string | null): void {
     const parsed = new URL(url, "http://localhost");
     if (token === null || !sameToken(token, this.opts.token)) {
-      this.log("rejected connection with bad token");
-      ws.close(4401, "bad token");
+      this.log(`rejected ${parsed.pathname} connection: token mismatch (hub token #${this.tokenId})`);
+      ws.close(WS_CLOSE.BAD_TOKEN, "bad token");
       return;
     }
     if (parsed.pathname === CONTROL_PATH) {
@@ -214,21 +233,26 @@ export class RemoraHub {
     }
     if (parsed.pathname !== WS_PATH) {
       this.log(`rejected connection on unknown path ${parsed.pathname}`);
-      ws.close(4404, "unknown path");
+      ws.close(WS_CLOSE.UNKNOWN_PATH, "unknown path");
       return;
     }
     if (this.socket) {
       this.log("replacing previous extension connection");
       try {
-        this.socket.close(4000, "replaced");
+        this.socket.close(WS_CLOSE.REPLACED, "replaced");
       } catch {
         /* ignore */
       }
       this.failAllPending({ code: "INTERNAL", message: "extension reconnected" });
     }
     this.socket = ws;
+    this.lastSeen = Date.now();
     this.log("extension connected, waiting for hello");
-    ws.on("message", (data) => this.handleMessage(String(data)));
+    ws.send(JSON.stringify({ event: "welcome", payload: { server: SERVER_VERSION, tokenId: this.tokenId } }));
+    ws.on("message", (data) => {
+      if (this.socket === ws) this.lastSeen = Date.now();
+      this.handleMessage(String(data));
+    });
     ws.on("close", () => {
       if (this.socket === ws) {
         this.socket = null;
@@ -275,12 +299,16 @@ export class RemoraHub {
         const parsed = ExtensionHelloPayloadSchema.safeParse(payload);
         if (!parsed.success) {
           this.log("bad hello payload, closing");
-          this.socket?.close(4002, "bad hello");
+          this.socket?.close(WS_CLOSE.BAD_HELLO, "bad hello");
           return;
         }
         this.info = { ...parsed.data, connectedAt: Date.now() };
         this.log(`hello from extension v${parsed.data.version} (${parsed.data.tabCount} tabs)`);
         this.broadcastState();
+        break;
+      }
+      case "ping": {
+        this.socket?.send(JSON.stringify({ event: "pong", payload }));
         break;
       }
       case "tab_closed": {
@@ -421,6 +449,7 @@ export class RemoraHub {
         this.log(`attached to hub on port ${this.opts.port}`);
         return;
       } catch (err) {
+        if (err instanceof BadTokenError) throw err;
         lastError = err;
         await delay(250);
       }
@@ -478,7 +507,15 @@ export class RemoraHub {
         }
       };
       const onError = (err: Error) => fail(err);
-      const onClose = () => fail(new Error("control socket closed during handshake"));
+      const onClose = (code: number) =>
+        fail(
+          code === WS_CLOSE.BAD_TOKEN
+            ? new BadTokenError(
+                `the Remora hub on port ${this.opts.port} uses a different token. ` +
+                  `Give every MCP client the same REMORA_TOKEN (or remove it so all read the config file).`,
+              )
+            : new Error("control socket closed during handshake"),
+        );
 
       ws.on("message", onMessage);
       ws.once("error", onError);

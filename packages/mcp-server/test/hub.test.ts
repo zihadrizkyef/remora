@@ -118,6 +118,34 @@ describe("hub multi-session sharing", () => {
     expect(code).toBe(4401);
   });
 
+  it("welcomes the extension with the token id and answers pings", async () => {
+    const port = await freePort();
+    const primary = track(new RemoraHub({ port, token: TOKEN }));
+    await primary.start();
+
+    const ext = new WebSocket(`ws://127.0.0.1:${port}/remora`, tokenProtocols(TOKEN));
+    const frames: Array<{ event?: string; payload?: { tokenId?: string; t?: number } }> = [];
+    ext.on("message", (raw) => frames.push(JSON.parse(String(raw))));
+    await new Promise((resolve) => ext.once("open", resolve));
+    ext.send(JSON.stringify({ event: "ping", payload: { t: 42 } }));
+    for (let i = 0; i < 40 && frames.length < 2; i++) await delay(25);
+
+    expect(frames[0]?.event).toBe("welcome");
+    expect(frames[0]?.payload?.tokenId).toBe(primary.tokenId);
+    expect(primary.tokenId).toMatch(/^[0-9a-f]{8}$/);
+    expect(frames[1]).toEqual({ event: "pong", payload: { t: 42 } });
+    ext.close();
+  });
+
+  it("explains a token mismatch between MCP processes", async () => {
+    const port = await freePort();
+    const primary = track(new RemoraHub({ port, token: TOKEN }));
+    await primary.start();
+
+    const other = track(new RemoraHub({ port, token: "another-token-0123456789" }));
+    await expect(other.start()).rejects.toThrow(/uses a different token/);
+  });
+
   it("fails loudly when the port is held by a foreign server", async () => {
     const port = await freePort();
     const foreign = new WebSocketServer({ host: "127.0.0.1", port });

@@ -69,6 +69,24 @@ Keduanya harus memakai token yang sama.
 5. Kembali ke popup → tekan **Reconnect**. Dot harus hijau
    "Terhubung".
 
+Sudah punya token di server (mis. dari `%APPDATA%\remora\config.json`)?
+Tempel langsung di kolom token popup lalu tekan **Enter** — extension
+menyimpan dan langsung menyambung ulang.
+
+### Kalau tidak tersambung
+
+Banner merah di popup menyebut penyebabnya:
+
+| Pesan | Artinya | Solusi |
+|---|---|---|
+| Server MCP tidak berjalan | Tidak ada proses Remora di port | Buka Claude / ZCode yang memuat Remora |
+| Token ditolak server | Token extension ≠ token server | Bandingkan `#id` token di footer popup dengan `tokenId` dari `remora_status`; tempel token yang benar |
+| Diambil alih koneksi lain | Remora aktif di profil Chrome lain | Matikan salah satunya |
+| Versi tidak cocok | Server/extension beda build | `npm run build`, reload extension, restart MCP client |
+
+Semua MCP client harus memakai token yang sama. Client yang tokennya beda
+gagal start dengan pesan "uses a different token".
+
 `REMORA_TOKEN` di env mengalahkan token di
 `%APPDATA%\remora\config.json` (`~/.remora/config.json` di macOS/Linux),
 jadi config.json hanya dipakai kalau env tidak diisi. Token hanya berlaku
