@@ -88,6 +88,7 @@ async function main(): Promise<void> {
     token: config.token,
     agentId: config.agentId,
     ownerLabel: config.ownerLabel,
+    extensionIds: config.extensionIds,
   });
   const ctx: Ctx = { hub };
 
@@ -131,10 +132,8 @@ async function main(): Promise<void> {
   }
 
   await hub.start();
-  if (config.freshToken) {
-    console.error(
-      `[remora] fresh auth token generated; paste it in the extension popup to pair (config: ${config.configPath})`,
-    );
+  if (config.ignoredEnvToken) {
+    console.error("[remora] REMORA_TOKEN is no longer used and was ignored; you can remove it from the MCP config");
   }
   console.error(`[remora] MCP server up; registered ${TOOL_DEFS.length} tools`);
 

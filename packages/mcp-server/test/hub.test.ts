@@ -115,24 +115,56 @@ describe("hub multi-session sharing", () => {
       legacy.on("close", (c) => resolve(c));
       legacy.on("error", () => undefined);
     });
-    expect(code).toBe(4401);
+    expect(code).toBe(4403);
   });
 
-  it("welcomes the extension with the token id and answers pings", async () => {
+  it("accepts the Chrome extension by origin, without a token", async () => {
+    const port = await freePort();
+    const primary = track(new RemoraHub({ port, token: TOKEN }));
+    await primary.start();
+
+    const ext = new WebSocket(`ws://127.0.0.1:${port}/remora`, ["remora"], {
+      origin: "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+    });
+    const first = await new Promise<{ event?: string }>((resolve, reject) => {
+      ext.once("message", (raw) => resolve(JSON.parse(String(raw))));
+      ext.once("close", (c) => reject(new Error(`closed ${c}`)));
+    });
+    expect(first.event).toBe("welcome");
+    ext.close();
+  });
+
+  it("refuses web pages and unlisted extensions, even with the token", async () => {
+    const port = await freePort();
+    const primary = track(
+      new RemoraHub({ port, token: TOKEN, extensionIds: ["abcdefghijklmnopabcdefghijklmnop"] }),
+    );
+    await primary.start();
+
+    const closeCode = (origin: string, path = "/remora") =>
+      new Promise<number>((resolve) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, tokenProtocols(TOKEN), { origin });
+        ws.on("close", (c) => resolve(c));
+        ws.on("error", () => undefined);
+      });
+    expect(await closeCode("https://evil.example")).toBe(4403);
+    expect(await closeCode("chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba")).toBe(4403);
+    expect(await closeCode("https://evil.example", "/remora-control")).toBe(4401);
+  });
+
+  it("welcomes the extension and answers pings", async () => {
     const port = await freePort();
     const primary = track(new RemoraHub({ port, token: TOKEN }));
     await primary.start();
 
     const ext = new WebSocket(`ws://127.0.0.1:${port}/remora`, tokenProtocols(TOKEN));
-    const frames: Array<{ event?: string; payload?: { tokenId?: string; t?: number } }> = [];
+    const frames: Array<{ event?: string; payload?: { t?: number } }> = [];
     ext.on("message", (raw) => frames.push(JSON.parse(String(raw))));
     await new Promise((resolve) => ext.once("open", resolve));
     ext.send(JSON.stringify({ event: "ping", payload: { t: 42 } }));
     for (let i = 0; i < 40 && frames.length < 2; i++) await delay(25);
 
     expect(frames[0]?.event).toBe("welcome");
-    expect(frames[0]?.payload?.tokenId).toBe(primary.tokenId);
-    expect(primary.tokenId).toMatch(/^[0-9a-f]{8}$/);
     expect(frames[1]).toEqual({ event: "pong", payload: { t: 42 } });
     ext.close();
   });
@@ -143,7 +175,7 @@ describe("hub multi-session sharing", () => {
     await primary.start();
 
     const other = track(new RemoraHub({ port, token: "another-token-0123456789" }));
-    await expect(other.start()).rejects.toThrow(/uses a different token/);
+    await expect(other.start()).rejects.toThrow(/uses a different config file/);
   });
 
   it("fails loudly when the port is held by a foreign server", async () => {

@@ -18,13 +18,13 @@ Nama "Remora" = ikan yang menempel pada hewan laut besar — extension ini
 [Agent via MCP client] --stdio--> [MCP Server Remora (Node.js, localhost)]
                                               |
                                    ws://127.0.0.1:PORT/remora
-                                   (server di MCP, auth token)
+                                   (server di MCP, cek Origin extension)
                                               |
 [Chrome Extension MV3] <--WebSocket client (auto-reconnect + heartbeat)--+
   - background service worker: WS client, chrome.* API, badge, title prefix
   - content script per tab: snapshot AX, interaksi sintetis, file inject,
     pill indikator, highlight target
-  - popup UI: status, pairing token, toggle, log aktivitas
+  - popup UI: status + alasan putus, config MCP, toggle, log aktivitas
 ```
 
 Keputusan arsitektur (final, jangan diubah tanpa diskusi):
@@ -51,7 +51,7 @@ remora/
       src/index.ts
     mcp-server/                # Node.js: MCP stdio + WS hub + implementasi tools
       src/index.ts             # entry: McpServer + register semua tools
-      src/hub.ts               # WebSocket server, auth token, routing, retry
+      src/hub.ts               # WebSocket server, cek Origin/token peer, routing, retry
       src/activity.ts          # emit agent_activity + sanitasi
       src/uploads.ts           # baca file disk + chunking base64
       src/tools/*.ts           # implementasi per kelompok tool
@@ -203,8 +203,11 @@ Drag-drop via event sintetis; file >50MB via chunking ±256KB + progress.
 
 ## 10. Keamanan
 
-- WS bind `127.0.0.1` saja + token acak (dibuat saat pertama jalan,
-  disimpan di config user, pairing via popup).
+- WS bind `127.0.0.1` saja. Extension diterima lewat header
+  `Origin: chrome-extension://<id>` (halaman web ditolak 4403; opsional
+  allowlist `extensionIds` di config) — user tidak pernah mengurus token.
+  Proses MCP peer memakai token internal yang dibuat otomatis di config
+  file (env `REMORA_TOKEN` diabaikan).
 - Isolasi Tab Group: extension menolak request yang menyentuh tab di luar
   grup milik `agentId` peminta (`OUT_OF_GROUP`); user menyeret tab masuk =
   izin, keluar/tutup grup = cabut. Permission `tabGroups` + `tabs`.
@@ -217,7 +220,7 @@ Drag-drop via event sintetis; file >50MB via chunking ±256KB + progress.
 ## 11. Definisi Done
 
 - `npm run typecheck` dan `npm run test` bersih.
-- Checklist E2E (docs/INSTALL.md) lolos: pairing → snapshot → klik/ketik
+- Checklist E2E (docs/INSTALL.md) lolos: koneksi otomatis → snapshot → klik/ketik
   (pill+badge+title+highlight terlihat) → `task_end` (pill hijau ±4s, title pulih) →
   screenshot annotated → clipboard → upload 4 skenario → JS gated → network.
 - Ikon tajam di toolbar 16px. Folder `dist/` siap rilis.

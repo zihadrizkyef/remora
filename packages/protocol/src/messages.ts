@@ -36,15 +36,11 @@ export const WS_CLOSE = {
   REPLACED: 4000,
   BAD_HELLO: 4002,
   BAD_TOKEN: 4401,
+  FORBIDDEN_ORIGIN: 4403,
   UNKNOWN_PATH: 4404,
   STALE: 4408,
 } as const;
 
-/** Short non-secret id of a token, so the user can compare both ends. */
-export async function tokenFingerprint(token: string): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-  return Array.from(new Uint8Array(digest).slice(0, 4), (b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 /**
  * The auth token travels in the WebSocket subprotocol list, not the URL:

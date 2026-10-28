@@ -8,12 +8,14 @@ export interface RemoraConfig {
   port: number;
   token: string;
   configPath: string;
-  /** True when the token was freshly generated on this run. */
-  freshToken: boolean;
   /** Stable id for this MCP process (owner of its Remora tab group). */
   agentId: string;
   /** Short human label for logs and status. */
   ownerLabel: string;
+  /** Optional allowlist of extension ids (config `extensionIds`). */
+  extensionIds: string[];
+  /** Set when the deprecated REMORA_TOKEN env var was present and ignored. */
+  ignoredEnvToken: boolean;
 }
 
 function configDir(): string {
@@ -33,8 +35,10 @@ function readJsonFile(path: string): Record<string, unknown> | null {
 }
 
 /**
- * Resolve port + auth token. Precedence: env vars > config file > generate.
- * A generated token is persisted so the extension pairing survives restarts.
+ * Resolve port + internal token. The token only authenticates MCP processes
+ * to each other, so it lives in the config file alone (never env): every
+ * client on this machine then shares it without any user setup. The
+ * extension needs no token; the hub trusts its `chrome-extension://` origin.
  *
  * Each MCP *process* gets its own agent id: explicit REMORA_AGENT_ID wins,
  * else a fresh random one per process (never persisted — persisting it would
@@ -49,30 +53,42 @@ export function loadConfig(): RemoraConfig {
   const portRaw = process.env.REMORA_PORT ?? stored.port;
   const port = Number(portRaw) > 0 ? Number(portRaw) : DEFAULT_WS_PORT;
 
-  let token = typeof process.env.REMORA_TOKEN === "string" && process.env.REMORA_TOKEN.length >= 16
-    ? process.env.REMORA_TOKEN
-    : typeof stored.token === "string" && stored.token.length >= 16
-      ? stored.token
-      : null;
+  let token = typeof stored.token === "string" && stored.token.length >= 16 ? stored.token : null;
 
-  let freshToken = false;
   const agentId = typeof process.env.REMORA_AGENT_ID === "string" && process.env.REMORA_AGENT_ID
     ? process.env.REMORA_AGENT_ID
     : randomBytes(6).toString("hex");
   if (!token) {
     token = randomBytes(24).toString("hex");
-    freshToken = true;
     mkdirSync(dir, { recursive: true });
-    writeFileSync(configPath, JSON.stringify({ port, token }, null, 2) + "\n", {
-      mode: 0o600,
-    });
+    try {
+      // `wx`: two clients starting together must end up sharing one token.
+      writeFileSync(configPath, JSON.stringify({ ...stored, port, token }, null, 2) + "\n", {
+        mode: 0o600,
+        flag: Object.keys(stored).length === 0 ? "wx" : "w",
+      });
+    } catch {
+      const raced = readJsonFile(configPath);
+      if (typeof raced?.token === "string" && raced.token.length >= 16) token = raced.token;
+    }
   }
+  const extensionIds = Array.isArray(stored.extensionIds)
+    ? stored.extensionIds.filter((id): id is string => typeof id === "string")
+    : [];
   const client = typeof process.env.REMORA_CLIENT === "string" && process.env.REMORA_CLIENT
     ? process.env.REMORA_CLIENT
     : "agent";
   const ownerLabel = `${client} ${agentId.slice(-6)}`;
 
-  return { port, token, configPath, freshToken, agentId, ownerLabel };
+  return {
+    port,
+    token,
+    configPath,
+    agentId,
+    ownerLabel,
+    extensionIds,
+    ignoredEnvToken: typeof process.env.REMORA_TOKEN === "string" && process.env.REMORA_TOKEN !== "",
+  };
 }
 
 /** MCP client config snippet the popup offers as copy-paste. */

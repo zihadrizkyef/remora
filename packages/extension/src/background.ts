@@ -21,6 +21,7 @@ import {
   WS_PATH,
   WS_PING_MS,
   WS_STALE_MS,
+  WS_SUBPROTOCOL,
   WireErrorCode,
   checkTab,
   clampIndexToGroup,
@@ -31,8 +32,6 @@ import {
   isUrlInScope,
   ownerOf,
   resolveImplicitTab,
-  tokenFingerprint,
-  tokenProtocols,
   parseWireFrame,
   validateMethodParams,
   visibleTabs,
@@ -71,8 +70,6 @@ let ws: WebSocket | null = null;
 let wsReady = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelayMs = 1000;
-let settingsToken = "";
-let settingsTokenId = "";
 let settingsPort = DEFAULT_WS_PORT;
 let jsEvalEnabled = false;
 let netCaptureEnabled = false;
@@ -92,8 +89,6 @@ const agentTabs = new Map<number, string>();
 
 async function refreshSettings(): Promise<void> {
   const s = await loadSettings();
-  settingsToken = s.token;
-  settingsTokenId = s.token ? await tokenFingerprint(s.token) : "";
   settingsPort = s.port;
   jsEvalEnabled = s.jsEvalEnabled;
   netCaptureEnabled = s.netCaptureEnabled;
@@ -103,10 +98,9 @@ async function refreshSettings(): Promise<void> {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   void (async () => {
-    const tokenChanged = changes.token && changes.token.newValue !== settingsToken;
     const portChanged = changes.port && Number(changes.port.newValue) !== settingsPort;
     await refreshSettings();
-    if (tokenChanged || portChanged) {
+    if (portChanged) {
       reconnectDelayMs = 1000;
       connect();
     }
@@ -120,6 +114,8 @@ chrome.runtime.onStartup.addListener(() => void booted);
 chrome.runtime.onInstalled.addListener(() => void booted);
 
 async function boot(): Promise<void> {
+  // Pairing tokens are gone; drop what older builds stored.
+  await chrome.storage.local.remove("token").catch(() => undefined);
   await refreshSettings();
   registerNetListeners();
   // Older builds kept global dynamic block rules; blocking is now per group.
@@ -237,8 +233,8 @@ if (chrome.alarms) {
 // WebSocket client
 // ---------------------------------------------------------------------------
 
-type ConnPhase = "unpaired" | "connecting" | "connected" | "retrying";
-type ConnErrorCode = "SERVER_DOWN" | "BAD_TOKEN" | "REPLACED" | "PROTOCOL" | "STALE" | "DROPPED";
+type ConnPhase = "connecting" | "connected" | "retrying";
+type ConnErrorCode = "SERVER_DOWN" | "OLD_SERVER" | "FORBIDDEN" | "REPLACED" | "PROTOCOL" | "STALE" | "DROPPED";
 
 interface ConnError {
   code: ConnErrorCode;
@@ -246,13 +242,13 @@ interface ConnError {
   at: number;
 }
 
-let phase: ConnPhase = "unpaired";
+let phase: ConnPhase = "connecting";
 let lastError: ConnError | null = null;
 let nextRetryAt: number | null = null;
 let attempt = 0;
 let connectedAt: number | null = null;
 let lastLatencyMs: number | undefined;
-let hubInfo: { server?: string; tokenId?: string } = {};
+let hubInfo: { server?: string } = {};
 let pingTimer: ReturnType<typeof setInterval> | null = null;
 let readyFallback: ReturnType<typeof setTimeout> | null = null;
 let wsTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -275,8 +271,6 @@ function connStatus() {
     nextRetryAt,
     connectedAt,
     latencyMs: phase === "connected" ? lastLatencyMs : undefined,
-    tokenId: settingsTokenId || null,
-    hubTokenId: hubInfo.tokenId ?? null,
     hubVersion: hubInfo.server ?? null,
   };
 }
@@ -323,17 +317,11 @@ function connect(): void {
   stopLinkTimers();
   wsReady = false;
   connectedAt = null;
-  if (!settingsToken) {
-    phase = "unpaired";
-    settled();
-    return;
-  }
-
   phase = "connecting";
   attempt++;
   let opened = false;
   staleClose = false;
-  const socket = new WebSocket(wsUrl(), tokenProtocols(settingsToken));
+  const socket = new WebSocket(wsUrl(), [WS_SUBPROTOCOL]);
   ws = socket;
   socket.onopen = () => {
     if (ws !== socket) return;
@@ -386,7 +374,6 @@ function handleLinkFrame(raw: string): boolean {
   if (frame.event === "welcome") {
     hubInfo = {
       server: typeof frame.payload?.server === "string" ? frame.payload.server : undefined,
-      tokenId: typeof frame.payload?.tokenId === "string" ? frame.payload.tokenId : undefined,
     };
     markReady();
     return true;
@@ -428,11 +415,16 @@ function classifyClose(code: number, reason: string, opened: boolean): ConnError
   switch (code) {
     case WS_CLOSE.BAD_TOKEN:
       return {
-        code: "BAD_TOKEN",
+        code: "OLD_SERVER",
         at,
         message:
-          "Token ditolak server: token di extension beda dengan token MCP server. " +
-          "Tempel token server di kolom di bawah, atau salin config ke MCP client lalu restart client.",
+          "MCP server masih versi lama. Tutup lalu buka lagi Claude / ZCode supaya memakai versi terbaru.",
+      };
+    case WS_CLOSE.FORBIDDEN_ORIGIN:
+      return {
+        code: "FORBIDDEN",
+        at,
+        message: "Extension ini tidak ada di daftar extensionIds pada config Remora.",
       };
     case WS_CLOSE.REPLACED:
       return {

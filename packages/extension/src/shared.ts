@@ -5,7 +5,6 @@
 
 export interface RemoraSettings {
   port: number;
-  token: string;
   jsEvalEnabled: boolean;
   netCaptureEnabled: boolean;
   blockedSites: string[];
@@ -13,7 +12,6 @@ export interface RemoraSettings {
 
 export const DEFAULT_SETTINGS: RemoraSettings = {
   port: 47291,
-  token: "",
   jsEvalEnabled: false,
   netCaptureEnabled: false,
   blockedSites: [],
@@ -23,7 +21,6 @@ export async function loadSettings(): Promise<RemoraSettings> {
   const stored = await chrome.storage.local.get(DEFAULT_SETTINGS);
   return {
     port: Number(stored.port) > 0 ? Number(stored.port) : DEFAULT_SETTINGS.port,
-    token: typeof stored.token === "string" ? stored.token : "",
     jsEvalEnabled: stored.jsEvalEnabled === true,
     netCaptureEnabled: stored.netCaptureEnabled === true,
     blockedSites: Array.isArray(stored.blockedSites) ? stored.blockedSites : [],

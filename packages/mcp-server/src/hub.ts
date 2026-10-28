@@ -17,7 +17,6 @@ import {
   WireError,
   WireMethodName,
   parseWireFrame,
-  tokenFingerprint,
   tokenFromProtocols,
   tokenProtocols,
   validateMethodParams,
@@ -103,11 +102,18 @@ export class RemoraHub {
     extension: null,
   };
   private stopped = false;
-  /** Fingerprint of the hub token, shown to the user to spot pairing mismatches. */
-  tokenId = "";
   private reattachTimer: NodeJS.Timeout | null = null;
 
-  constructor(private readonly opts: { port: number; token: string; agentId?: string; ownerLabel?: string }) {
+  constructor(
+    private readonly opts: {
+      port: number;
+      token: string;
+      agentId?: string;
+      ownerLabel?: string;
+      /** Extension ids allowed to connect; empty = any Chrome extension origin. */
+      extensionIds?: string[];
+    },
+  ) {
     this.log = (msg) => console.error(`[remora hub] ${msg}`);
     this.agentId = opts.agentId ?? `agent-${randomUUID().slice(0, 8)}`;
     this.ownerLabel = opts.ownerLabel ?? `agent ${this.agentId.slice(-6)}`;
@@ -129,7 +135,6 @@ export class RemoraHub {
 
   async start(): Promise<void> {
     this.stopped = false;
-    this.tokenId = await tokenFingerprint(this.opts.token);
     try {
       await this.startServer();
       this.log(`listening on 127.0.0.1:${this.opts.port}${WS_PATH}`);
@@ -201,7 +206,12 @@ export class RemoraHub {
     this.wss = wss;
     this.mode = "server";
     wss.on("connection", (ws, req) =>
-      this.handleConnection(ws, req.url ?? "", tokenFromProtocols(req.headers["sec-websocket-protocol"])),
+      this.handleConnection(
+        ws,
+        req.url ?? "",
+        tokenFromProtocols(req.headers["sec-websocket-protocol"]),
+        req.headers.origin,
+      ),
     );
     wss.on("error", (err) => this.log(`server error: ${String(err)}`));
     this.heartbeat = setInterval(() => {
@@ -220,15 +230,27 @@ export class RemoraHub {
     this.heartbeat.unref?.();
   }
 
-  private handleConnection(ws: WebSocket, url: string, token: string | null): void {
+  /**
+   * Browsers always send `Origin` and pages cannot forge it, so an extension
+   * origin is proof enough for the extension link; web pages are refused
+   * outright. Peer MCP processes send no origin and prove themselves with
+   * the shared token from the config file.
+   */
+  private handleConnection(ws: WebSocket, url: string, token: string | null, origin: string | undefined): void {
     const parsed = new URL(url, "http://localhost");
-    if (token === null || !sameToken(token, this.opts.token)) {
-      this.log(`rejected ${parsed.pathname} connection: token mismatch (hub token #${this.tokenId})`);
-      ws.close(WS_CLOSE.BAD_TOKEN, "bad token");
+    const tokenOk = token !== null && sameToken(token, this.opts.token);
+    if (parsed.pathname === CONTROL_PATH) {
+      if (origin !== undefined || !tokenOk) {
+        this.log("rejected peer connection: bad token or browser origin");
+        ws.close(WS_CLOSE.BAD_TOKEN, "bad token");
+        return;
+      }
+      this.handlePeer(ws);
       return;
     }
-    if (parsed.pathname === CONTROL_PATH) {
-      this.handlePeer(ws);
+    if (parsed.pathname === WS_PATH && !this.isAllowedClient(origin, tokenOk)) {
+      this.log(`rejected extension connection from origin ${origin ?? "(none)"}`);
+      ws.close(WS_CLOSE.FORBIDDEN_ORIGIN, "origin not allowed");
       return;
     }
     if (parsed.pathname !== WS_PATH) {
@@ -248,7 +270,7 @@ export class RemoraHub {
     this.socket = ws;
     this.lastSeen = Date.now();
     this.log("extension connected, waiting for hello");
-    ws.send(JSON.stringify({ event: "welcome", payload: { server: SERVER_VERSION, tokenId: this.tokenId } }));
+    ws.send(JSON.stringify({ event: "welcome", payload: { server: SERVER_VERSION } }));
     ws.on("message", (data) => {
       if (this.socket === ws) this.lastSeen = Date.now();
       this.handleMessage(String(data));
@@ -263,6 +285,14 @@ export class RemoraHub {
       }
     });
     ws.on("error", (err) => this.log(`socket error: ${String(err)}`));
+  }
+
+  private isAllowedClient(origin: string | undefined, tokenOk: boolean): boolean {
+    if (origin === undefined) return tokenOk;
+    const m = /^chrome-extension:\/\/([a-p]{32})$/.exec(origin);
+    if (!m) return false;
+    const allowed = this.opts.extensionIds ?? [];
+    return allowed.length === 0 || allowed.includes(m[1]!);
   }
 
   private handleMessage(raw: string): void {
@@ -511,8 +541,8 @@ export class RemoraHub {
         fail(
           code === WS_CLOSE.BAD_TOKEN
             ? new BadTokenError(
-                `the Remora hub on port ${this.opts.port} uses a different token. ` +
-                  `Give every MCP client the same REMORA_TOKEN (or remove it so all read the config file).`,
+                `the Remora hub on port ${this.opts.port} uses a different config file. ` +
+                  `Run every MCP client as the same user, or set REMORA_PORT to another value.`,
               )
             : new Error("control socket closed during handshake"),
         );

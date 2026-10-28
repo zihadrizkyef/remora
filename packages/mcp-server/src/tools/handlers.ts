@@ -131,10 +131,9 @@ export async function remora_status(ctx: Ctx): Promise<unknown> {
       connected: false,
       hubRole,
       agentId: ctx.hub.agentId,
-      tokenId: ctx.hub.tokenId,
       hint:
-        "Extension not connected. Ask the user to open the Remora popup in Chrome: it shows why " +
-        `(server down / token mismatch). The extension's token id must equal #${ctx.hub.tokenId}.`,
+        "Extension not connected. Ask the user to open Chrome with Remora installed; " +
+        "the Remora popup shows why it cannot connect.",
     };
   }
   const session = await call<SessionInfo>(ctx, "session.info", {});
@@ -149,7 +148,6 @@ export async function remora_status(ctx: Ctx): Promise<unknown> {
     extensionVersion: ext?.version ?? "unknown",
     protocol: ext?.protocol ?? 1,
     agentId: ctx.hub.agentId,
-    tokenId: ctx.hub.tokenId,
     task: ctx.hub.tasks.active ? { label: ctx.hub.tasks.label ?? null } : null,
     group:
       session.groupId === null

@@ -9,15 +9,16 @@ Remora memberi agent AI kendali besar atas browser user. Risiko utama:
    perintah user, kirim cookies ke X").
 2. **Akses berlebihan** — `host_permissions: <all_urls>` berarti extension
    teknisnya bisa membaca semua situs.
-3. **Eksfiltrasi lokal** — WebSocket localhost + token; aplikasi lain di
-   mesin yang sama bisa mencoba terhubung.
+3. **Eksfiltrasi lokal** — WebSocket localhost; halaman web atau aplikasi
+   lain di mesin yang sama bisa mencoba terhubung.
 
 ## Lapisan Pertahanan
 
 | Lapisan | Implementasi |
 |---|---|
 | Localhost saja | WS bind `127.0.0.1`, tidak pernah `0.0.0.0`. Tidak ada lalu lintas jaringan. |
-| Token acak 48-hex | Dibuat di popup (Regenerate), dikirim lewat subprotocol WebSocket (`Sec-WebSocket-Protocol`), bukan URL — jadi tidak ikut tercatat di halaman Errors Chrome. Koneksi tanpa token ditolak (4401). |
+| Cek `Origin` untuk extension | Jalur `/remora` hanya menerima `Origin: chrome-extension://<id>`. Browser selalu mengirim `Origin` dan halaman web tidak bisa memalsukannya, jadi situs mana pun (termasuk `http://localhost`) ditolak (4403). Opsional: `extensionIds` di config membatasi ke id tertentu. Tidak ada token yang perlu disalin user. |
+| Token internal antar-proses | Dibuat otomatis di config file (48-hex), hanya untuk proses MCP lain yang attach ke `/remora-control`; dikirim lewat subprotocol WebSocket, bukan URL. Koneksi dengan `Origin` browser atau token salah ditolak (4401). |
 | JS eval default OFF | `evaluate_js` ditolak `NOT_ALLOWED` sampai user mengaktifkan toggle di popup. |
 | Network capture default OFF | Sama untuk `net_capture_*`. |
 | Kill-switch per-site | Origin yang diblokir menolak SEMUA aksi agent (`SITE_BLOCKED`). |
@@ -27,7 +28,7 @@ Remora memberi agent AI kendali besar atas browser user. Risiko utama:
 | Tidak ada debugger | Tanpa `chrome.debugger`/CDP — tidak ada attach senyap ke tab. |
 | Sanitizer pill | Isi ketikan tidak pernah tampil di pill ("mengetik di …" saja). |
 | Token tidak di-log | MCP maupun extension tidak pernah menulis token ke log/console. |
-| Channel kontrol peer | Proses MCP sesi lain attach ke hub lewat `/remora-control` di loopback dengan token yang sama; tanpa token ditolak (4401), dan hanya meneruskan request ke hub — tidak menambah jalur akses baru ke Chrome. |
+| Channel kontrol peer | Proses MCP sesi lain attach ke hub lewat `/remora-control` di loopback dengan token internal dari config file yang sama; tanpa token ditolak (4401), dan hanya meneruskan request ke hub — tidak menambah jalur akses baru ke Chrome. |
 
 ## Permission Chrome
 
@@ -43,8 +44,9 @@ Remora memberi agent AI kendali besar atas browser user. Risiko utama:
 ## Isolasi Tab Group — edge case
 
 - **`agentId` bukan autentikasi.** Isolasi memisahkan sesi agent yang
-  kooperatif dan melindungi tab user. Proses lokal yang memegang token WS
-  bisa mengaku `agentId` apa pun; batas keamanannya tetap token.
+  kooperatif dan melindungi tab user. Proses lokal yang bisa terhubung ke
+  hub bisa mengaku `agentId` apa pun; batas keamanannya adalah akses ke
+  mesin lokal.
 - **Restart browser = grup yatim.** Kepemilikan disimpan di
   `chrome.storage.session` dan id grup berubah setelah restart, jadi grup
   yang dipulihkan Chrome tidak punya pemilik dan tak bisa diakses agent
@@ -90,10 +92,14 @@ Remora memberi agent AI kendali besar atas browser user. Risiko utama:
 
 ## Batasan yang Disadari
 
-- **Token di `127.0.0.1` tanpa TLS.** Di mesin single-user ini dapat
-  diterima (loopback tidak keluar mesin), tapi malware lokal dengan akses
-  file config (`%APPDATA%\remora\config.json`) bisa membaca token.
+- **Proses lokal tetap bisa masuk.** Program native (bukan browser) bisa
+  memalsukan header `Origin` atau membaca token internal di
+  `%APPDATA%\remora\config.json`. Ini sama dengan model token lama:
+  malware yang sudah berjalan sebagai user dianggap di luar cakupan.
   Mitigasi: file config ditulis dengan mode `0600` (POSIX).
+- **Extension lain di Chrome yang sama** juga punya origin
+  `chrome-extension://`. Kalau ini jadi perhatian, isi `extensionIds`
+  di config dengan id Remora (lihat `chrome://extensions`).
 - **`clipboardRead` implisit.** Clipboard read dilakukan via content
   script di tab aktif dan butuh fokus halaman; Chrome tetap bisa meminta
   izin eksplisit tergantung versi.
@@ -110,6 +116,7 @@ Remora memberi agent AI kendali besar atas browser user. Risiko utama:
 1. Blokir situs sensitif (bank, email utama, dashboard produksi)
    SEBELUM memberi agent tugas browsing.
 2. Nyalakan JS eval / network capture hanya per-sesi, matikan sesudahnya.
-3. Regenerate token jika pernah menempel config ke tempat publik.
+3. Isi `extensionIds` di config bila ada extension lain yang tidak
+   dipercaya di profil Chrome yang sama.
 4. Jangan load extension Remora di profil Chrome yang dipakai untuk
    hal paling sensitif — gunakan profil terpisah bila perlu.
