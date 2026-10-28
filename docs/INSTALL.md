@@ -41,38 +41,45 @@ Hasil build:
 > viewer PDF bawaan) tidak bisa diotomatisasi — itu batasan Chrome,
 > bukan bug Remora. Navigasikan ke halaman web biasa untuk testing.
 
-## 4. Pairing (Token)
+## 4. Hubungkan ke MCP Client (tanpa token)
 
-Token dibuat di popup extension, lalu ditempel ke config MCP client.
-Keduanya harus memakai token yang sama.
+Tidak ada token yang perlu disalin. Extension otomatis tersambung ke
+MCP server mana pun yang berjalan di `127.0.0.1:47291`.
 
-1. Klik ikon Remora → tekan **Regenerate** → token baru dibuat.
-2. Tekan **Copy MCP config JSON**. Hasilnya seperti ini:
+1. Klik ikon Remora → **Copy MCP config JSON**. Hasilnya:
    ```json
    {
      "mcpServers": {
        "remora": {
          "command": "node",
-         "args": ["D:/Dev/Claude/Projects/Remora/packages/mcp-server/dist/index.js"],
-         "env": {
-           "REMORA_TOKEN": "<token dari popup>",
-           "REMORA_PORT": "47291"
-         }
+         "args": ["D:/Dev/Claude/Projects/Remora/packages/mcp-server/dist/index.js"]
        }
      }
    }
    ```
-3. Tempel ke config MCP client kamu:
+2. Tempel ke config tiap MCP client yang mau memakai Remora:
    - Claude Desktop: `%APPDATA%\Claude\claude_desktop_config.json`
    - ZCode: pengaturan MCP workspace.
-4. Restart MCP client (atau reload server MCP).
-5. Kembali ke popup → tekan **Reconnect**. Dot harus hijau
-   "Terhubung".
+3. Restart MCP client. Popup berubah hijau "Terhubung" dalam beberapa
+   detik.
 
-`REMORA_TOKEN` di env mengalahkan token di
-`%APPDATA%\remora\config.json` (`~/.remora/config.json` di macOS/Linux),
-jadi config.json hanya dipakai kalau env tidak diisi. Token hanya berlaku
-untuk `127.0.0.1` dan tidak pernah keluar mesin.
+Banyak client (Claude + ZCode) boleh jalan bersamaan: proses pertama
+memegang port, yang lain menumpang otomatis. Token internal antar-proses
+ada di `%APPDATA%\remora\config.json` (`~/.remora/config.json` di
+macOS/Linux) dan dibuat sendiri — tidak perlu disentuh. `REMORA_TOKEN`
+di env sudah tidak dipakai dan boleh dihapus.
+
+### Kalau tidak tersambung
+
+Banner merah di popup menyebut penyebabnya:
+
+| Pesan | Artinya | Solusi |
+|---|---|---|
+| Server MCP tidak berjalan | Tidak ada proses Remora di port | Buka Claude / ZCode yang memuat Remora |
+| MCP server masih versi lama | Proses lama dari sebelum update | Tutup lalu buka lagi Claude / ZCode |
+| Diambil alih koneksi lain | Remora aktif di profil Chrome lain | Matikan salah satunya |
+| Tidak ada di daftar extensionIds | `extensionIds` di config membatasi extension | Tambahkan id extension ini, atau hapus daftarnya |
+| Versi tidak cocok | Server/extension beda build | `npm run build`, reload extension, restart MCP client |
 
 ## 5. Uji Cepat (Smoke Test)
 
@@ -87,7 +94,7 @@ Di MCP client, jalankan tool berurutan:
    badge di ikon extension, dan `● ` di judul tab.
 
 Jika `remora_status` bilang tidak terhubung: pastikan Chrome terbuka,
-extension aktif (bukan abu-abu), token sama di kedua sisi, dan tidak ada
+extension aktif (bukan abu-abu), dan tidak ada
 aplikasi lain memakai port 47291.
 
 ### Beberapa sesi agent sekaligus
@@ -130,13 +137,13 @@ npm run build
 ```
 
 Lalu di `chrome://extensions` tekan **Reload** pada Remora, dan restart
-MCP server di client. Token tidak berubah (kecuali Regenerate).
+MCP server di client.
 
 ## 8. Checklist E2E (Definisi Done)
 
 Jalankan berurutan, semua harus lolos:
 
-- [ ] Pairing: dot hijau, `remora_status.connected == true`.
+- [ ] Koneksi otomatis: dot hijau tanpa token, `remora_status.connected == true`.
 - [ ] `tabs_list` / `tab_create` / `navigate` / `go_back` / `reload`.
 - [ ] `tab_create` pertama membuat grup `🤖 Remora · …` (cyan saat berjalan);
       `tabs_list` hanya berisi tab grup; `remora_status.hiddenTabs`

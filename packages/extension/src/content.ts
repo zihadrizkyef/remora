@@ -38,7 +38,15 @@ import {
   uploadDrop,
   uploadInject,
 } from "./content/uploads.js";
-import { hideAnnotate, releaseIndicators, showActivity, showAnnotate, showTaskEnd } from "./content/overlay.js";
+import {
+  clearOrphanedMarkers,
+  hideAnnotate,
+  releaseIndicators,
+  showActivity,
+  showAnnotate,
+  showTaskEnd,
+  teardownOverlay,
+} from "./content/overlay.js";
 import type { TaskInfo, TaskOutcome } from "./content/overlay.js";
 import { installCapture, readConsole, readErrors } from "./content/capture.js";
 
@@ -48,7 +56,28 @@ type P = Record<string, unknown>;
 const str = (v: unknown) => (typeof v === "string" ? v : undefined);
 const num = (v: unknown) => (typeof v === "number" ? v : undefined);
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+// Reloading the extension leaves the old content script running in open
+// pages, cut off from the extension, and Remora then injects a new one. The
+// newest instance announces itself on the shared DOM (works across isolated
+// worlds); older ones retire so a page never shows two pills.
+const TAKEOVER_EVENT = "remora:takeover";
+document.dispatchEvent(new Event(TAKEOVER_EVENT));
+clearOrphanedMarkers();
+document.addEventListener(TAKEOVER_EVENT, retire);
+
+function retire(): void {
+  document.removeEventListener(TAKEOVER_EVENT, retire);
+  try {
+    chrome.runtime.onMessage.removeListener(onMessage);
+  } catch {
+    /* runtime already gone */
+  }
+  teardownOverlay();
+}
+
+chrome.runtime.onMessage.addListener(onMessage);
+
+function onMessage(msg: unknown, _sender: chrome.runtime.MessageSender, sendResponse: (r?: unknown) => void): boolean {
   if (!msg || typeof msg !== "object") return false;
   const m = msg as {
     type?: string;
@@ -80,7 +109,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     else sendResponse(wireError("INTERNAL", err instanceof Error ? err.message : String(err)));
   });
   return true; // async response
-});
+}
 
 async function dispatch(method: string, params: P): Promise<unknown> {
   switch (method) {

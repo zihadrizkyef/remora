@@ -17,7 +17,11 @@ import {
   ShowActivityPayloadSchema as ActivityShowSchema,
   TAB_GROUP_NONE,
   TaskEndPayloadSchema,
+  WS_CLOSE,
   WS_PATH,
+  WS_PING_MS,
+  WS_STALE_MS,
+  WS_SUBPROTOCOL,
   WireErrorCode,
   checkTab,
   clampIndexToGroup,
@@ -28,7 +32,6 @@ import {
   isUrlInScope,
   ownerOf,
   resolveImplicitTab,
-  tokenProtocols,
   parseWireFrame,
   validateMethodParams,
   visibleTabs,
@@ -67,7 +70,6 @@ let ws: WebSocket | null = null;
 let wsReady = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectDelayMs = 1000;
-let settingsToken = "";
 let settingsPort = DEFAULT_WS_PORT;
 let jsEvalEnabled = false;
 let netCaptureEnabled = false;
@@ -87,7 +89,6 @@ const agentTabs = new Map<number, string>();
 
 async function refreshSettings(): Promise<void> {
   const s = await loadSettings();
-  settingsToken = s.token;
   settingsPort = s.port;
   jsEvalEnabled = s.jsEvalEnabled;
   netCaptureEnabled = s.netCaptureEnabled;
@@ -97,18 +98,24 @@ async function refreshSettings(): Promise<void> {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   void (async () => {
-    const tokenChanged = changes.token && changes.token.newValue !== settingsToken;
     const portChanged = changes.port && Number(changes.port.newValue) !== settingsPort;
     await refreshSettings();
-    if (tokenChanged || portChanged) connect();
+    if (portChanged) {
+      reconnectDelayMs = 1000;
+      connect();
+    }
   })();
 });
 
-chrome.runtime.onStartup.addListener(() => void boot());
-chrome.runtime.onInstalled.addListener(() => void boot());
-void boot();
+// Every worker start runs the module once; these listeners only exist so
+// Chrome wakes the worker on browser start / install.
+const booted = boot();
+chrome.runtime.onStartup.addListener(() => void booted);
+chrome.runtime.onInstalled.addListener(() => void booted);
 
 async function boot(): Promise<void> {
+  // Pairing tokens are gone; drop what older builds stored.
+  await chrome.storage.local.remove("token").catch(() => undefined);
   await refreshSettings();
   registerNetListeners();
   // Older builds kept global dynamic block rules; blocking is now per group.
@@ -181,13 +188,19 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (!msg || typeof msg !== "object") return false;
   const type = (msg as { type?: string }).type;
   if (type === "remora:status") {
-    sendResponse({ connected: wsReady && !!ws && ws.readyState === WebSocket.OPEN, latencyMs: lastLatencyMs });
-    return false;
+    void booted.then(() => sendResponse(connStatus()));
+    return true;
   }
   if (type === "remora:reconnect") {
-    connect();
-    sendResponse({ ok: true });
-    return false;
+    void (async () => {
+      await booted;
+      await refreshSettings();
+      reconnectDelayMs = 1000;
+      connect();
+      await waitSettled(6000);
+      sendResponse(connStatus());
+    })();
+    return true;
   }
   if (type === "remora:ready") {
     // A fresh page in a tab the agent touched <8s ago (e.g. right after
@@ -204,27 +217,81 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return false;
 });
 
-let lastLatencyMs: number | undefined;
-let lastPingAt = 0;
-void lastPingAt;
-
-const WS_TIMEOUT_MS = 30_000;
-let wsTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
-
 // MV3 suspends the worker, so the socket can drop while idle; an alarms tick
-// reconnects it without relying on the worker staying alive.
+// wakes the worker and reconnects without relying on it staying alive.
 if (chrome.alarms) {
   chrome.alarms.create("remora-keepalive", { periodInMinutes: 0.5 });
   chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === "remora-keepalive" && (!ws || ws.readyState !== WebSocket.OPEN)) {
-      connect();
-    }
+    if (alarm.name !== "remora-keepalive") return;
+    void booted.then(() => {
+      if (!ws && !reconnectTimer) connect();
+    });
   });
 }
 
 // ---------------------------------------------------------------------------
 // WebSocket client
 // ---------------------------------------------------------------------------
+
+type ConnPhase = "connecting" | "connected" | "retrying";
+type ConnErrorCode = "SERVER_DOWN" | "OLD_SERVER" | "FORBIDDEN" | "REPLACED" | "PROTOCOL" | "STALE" | "DROPPED";
+
+interface ConnError {
+  code: ConnErrorCode;
+  message: string;
+  at: number;
+}
+
+let phase: ConnPhase = "connecting";
+let lastError: ConnError | null = null;
+let nextRetryAt: number | null = null;
+let attempt = 0;
+let connectedAt: number | null = null;
+let lastLatencyMs: number | undefined;
+let hubInfo: { server?: string } = {};
+let pingTimer: ReturnType<typeof setInterval> | null = null;
+let readyFallback: ReturnType<typeof setTimeout> | null = null;
+let wsTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+let staleClose = false;
+const settleWaiters = new Set<() => void>();
+
+const MAX_BACKOFF_MS = 10_000;
+const REPLACED_RETRY_MS = 30_000;
+// Hubs older than the `welcome` frame never announce themselves; a link that
+// survives this long passed the token check.
+const READY_FALLBACK_MS = 1500;
+
+function connStatus() {
+  return {
+    phase,
+    connected: phase === "connected",
+    port: settingsPort,
+    attempt,
+    lastError,
+    nextRetryAt,
+    connectedAt,
+    latencyMs: phase === "connected" ? lastLatencyMs : undefined,
+    hubVersion: hubInfo.server ?? null,
+  };
+}
+
+/** Resolve once the current attempt connects or fails (or after `ms`). */
+function waitSettled(ms: number): Promise<void> {
+  if (phase !== "connecting") return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      settleWaiters.delete(done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    settleWaiters.add(done);
+  });
+}
+
+function settled(): void {
+  for (const done of [...settleWaiters]) done();
+}
 
 function wsUrl(): string {
   return `ws://127.0.0.1:${settingsPort}${WS_PATH}`;
@@ -235,6 +302,7 @@ function connect(): void {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  nextRetryAt = null;
   if (ws) {
     // Detach first: the old socket's close event fires asynchronously, and an
     // unguarded handler would null out the socket we are about to create.
@@ -246,43 +314,152 @@ function connect(): void {
     }
     ws = null;
   }
+  stopLinkTimers();
   wsReady = false;
-  if (!settingsToken) return; // unpaired: popup will supply the token
-
-  const socket = new WebSocket(wsUrl(), tokenProtocols(settingsToken));
+  connectedAt = null;
+  phase = "connecting";
+  attempt++;
+  let opened = false;
+  staleClose = false;
+  const socket = new WebSocket(wsUrl(), [WS_SUBPROTOCOL]);
   ws = socket;
   socket.onopen = () => {
     if (ws !== socket) return;
-    wsReady = true;
-    reconnectDelayMs = 1000;
+    opened = true;
     resetWsTimeout();
+    readyFallback = setTimeout(() => {
+      if (ws === socket && phase === "connecting") markReady();
+    }, READY_FALLBACK_MS);
     void chrome.tabs.query({}).then((tabs) => {
-      sendEvent("hello", {
-        version: chrome.runtime.getManifest().version,
-        protocol: 1,
-        tabCount: tabs.length,
-      });
+      if (ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(
+        JSON.stringify({
+          event: "hello",
+          payload: { version: chrome.runtime.getManifest().version, protocol: 1, tabCount: tabs.length },
+        }),
+      );
     });
   };
   socket.onmessage = (ev) => {
     if (ws !== socket) return;
     resetWsTimeout();
-    void handleFrame(String(ev.data));
+    const raw = String(ev.data);
+    if (handleLinkFrame(raw)) return;
+    if (phase === "connecting") markReady();
+    void handleFrame(raw);
   };
-  socket.onclose = () => {
+  socket.onclose = (ev) => {
     if (ws !== socket) return;
-    wsReady = false;
     ws = null;
-    clearWsTimeout();
-    scheduleReconnect();
+    wsReady = false;
+    connectedAt = null;
+    stopLinkTimers();
+    lastError = classifyClose(ev.code, ev.reason, opened);
+    scheduleReconnect(lastError.code);
+    settled();
   };
   socket.onerror = () => {
-    try {
-      socket.close();
-    } catch {
-      /* handled by onclose */
-    }
+    // Chrome gives no detail here; onclose follows with the code we report.
   };
+}
+
+/** Link-level frames (`welcome`, `pong`) never reach the request router. */
+function handleLinkFrame(raw: string): boolean {
+  let frame: { event?: unknown; payload?: Record<string, unknown> };
+  try {
+    frame = JSON.parse(raw) as typeof frame;
+  } catch {
+    return false;
+  }
+  if (frame.event === "welcome") {
+    hubInfo = {
+      server: typeof frame.payload?.server === "string" ? frame.payload.server : undefined,
+    };
+    markReady();
+    return true;
+  }
+  if (frame.event === "pong") {
+    const t = Number(frame.payload?.t);
+    if (Number.isFinite(t)) lastLatencyMs = Math.max(0, Date.now() - t);
+    return true;
+  }
+  return false;
+}
+
+function markReady(): void {
+  if (phase === "connected") return;
+  if (readyFallback) {
+    clearTimeout(readyFallback);
+    readyFallback = null;
+  }
+  phase = "connected";
+  wsReady = true;
+  connectedAt = Date.now();
+  lastError = null;
+  attempt = 0;
+  reconnectDelayMs = 1000;
+  sendPing();
+  pingTimer = setInterval(sendPing, WS_PING_MS);
+  settled();
+}
+
+function sendPing(): void {
+  send({ event: "ping", payload: { t: Date.now() } });
+}
+
+function classifyClose(code: number, reason: string, opened: boolean): ConnError {
+  const at = Date.now();
+  if (staleClose) {
+    return { code: "STALE", at, message: `Server tidak merespons selama ${WS_STALE_MS / 1000} detik.` };
+  }
+  switch (code) {
+    case WS_CLOSE.BAD_TOKEN:
+      return {
+        code: "OLD_SERVER",
+        at,
+        message:
+          "MCP server masih versi lama. Tutup lalu buka lagi Claude / ZCode supaya memakai versi terbaru.",
+      };
+    case WS_CLOSE.FORBIDDEN_ORIGIN:
+      return {
+        code: "FORBIDDEN",
+        at,
+        message: "Extension ini tidak ada di daftar extensionIds pada config Remora.",
+      };
+    case WS_CLOSE.REPLACED:
+      return {
+        code: "REPLACED",
+        at,
+        message: "Diambil alih koneksi Remora lain (profil Chrome lain?). Dicoba lagi dalam 30 detik.",
+      };
+    case WS_CLOSE.STALE:
+      return { code: "STALE", at, message: "Server memutus koneksi karena extension tidak merespons." };
+    case WS_CLOSE.BAD_HELLO:
+    case WS_CLOSE.UNKNOWN_PATH:
+      return {
+        code: "PROTOCOL",
+        at,
+        message: `Versi server dan extension tidak cocok (${reason || code}). Build ulang lalu restart MCP client.`,
+      };
+  }
+  if (!opened) {
+    return {
+      code: "SERVER_DOWN",
+      at,
+      message:
+        `Server MCP tidak berjalan di 127.0.0.1:${settingsPort}. ` +
+        "Buka MCP client (Claude / ZCode) yang memuat Remora.",
+    };
+  }
+  return { code: "DROPPED", at, message: `Koneksi terputus (kode ${code}${reason ? `: ${reason}` : ""}).` };
+}
+
+function stopLinkTimers(): void {
+  if (pingTimer) clearInterval(pingTimer);
+  pingTimer = null;
+  if (readyFallback) clearTimeout(readyFallback);
+  readyFallback = null;
+  clearWsTimeout();
 }
 
 /** Drop handlers so a superseded socket cannot mutate current state. */
@@ -298,9 +475,10 @@ function resetWsTimeout(): void {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   wsTimeoutTimer = setTimeout(() => {
     if (ws?.readyState === WebSocket.OPEN) {
+      staleClose = true;
       ws.close();
     }
-  }, WS_TIMEOUT_MS);
+  }, WS_STALE_MS);
 }
 
 function clearWsTimeout(): void {
@@ -310,15 +488,22 @@ function clearWsTimeout(): void {
   }
 }
 
-function scheduleReconnect(): void {
+function scheduleReconnect(code: ConnErrorCode): void {
   if (reconnectTimer) clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(
-    () => {
-      reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30_000);
-      connect();
-    },
-    reconnectDelayMs + Math.floor(Math.random() * 500),
-  );
+  let waitMs: number;
+  if (code === "REPLACED") {
+    // Two extension instances would otherwise evict each other forever.
+    waitMs = REPLACED_RETRY_MS;
+  } else {
+    waitMs = reconnectDelayMs + Math.floor(Math.random() * 300);
+    reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_BACKOFF_MS);
+  }
+  phase = "retrying";
+  nextRetryAt = Date.now() + waitMs;
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, waitMs);
 }
 
 function send(obj: unknown): void {

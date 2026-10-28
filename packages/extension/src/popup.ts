@@ -1,10 +1,10 @@
 /**
- * Remora popup logic: connection state, pairing token, gates, per-site
+ * Remora popup logic: connection state, MCP setup, gates, per-site
  * kill-switch, and the agent activity audit log.
  * Visual system follows design/Remora Popup.html (Operate surface).
  */
 
-import { loadSettings, saveSettings, originOf } from "./shared.js";
+import { DEFAULT_SETTINGS, loadSettings, saveSettings, originOf } from "./shared.js";
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -47,20 +47,14 @@ async function copyText(text: string, okMsg: string): Promise<void> {
   }
 }
 
-function randomToken(): string {
-  const bytes = new Uint8Array(24);
-  crypto.getRandomValues(bytes);
-  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-function mcpConfig(token: string, port: number): string {
+function mcpConfig(port: number): string {
   return JSON.stringify(
     {
       mcpServers: {
         remora: {
           command: "node",
           args: ["D:/Dev/Claude/Projects/Remora/packages/mcp-server/dist/index.js"],
-          env: { REMORA_TOKEN: token, REMORA_PORT: String(port) },
+          ...(port === DEFAULT_SETTINGS.port ? {} : { env: { REMORA_PORT: String(port) } }),
         },
       },
     },
@@ -69,33 +63,75 @@ function mcpConfig(token: string, port: number): string {
   );
 }
 
-type ConnState = "connected" | "disconnected" | "pairing";
+type ConnState = "connected" | "disconnected" | "connecting";
+
+interface ConnStatus {
+  phase: "connecting" | "connected" | "retrying";
+  connected: boolean;
+  port: number;
+  attempt: number;
+  lastError: { code: string; message: string; at: number } | null;
+  nextRetryAt: number | null;
+  latencyMs?: number;
+}
 
 function setState(state: ConnState, label: string): void {
   $("popup").dataset.state = state;
   $("conn-label").textContent = label;
 }
 
-async function refreshConnection(): Promise<void> {
-  const s = await loadSettings();
-  const status = await chrome.runtime
-    .sendMessage({ type: "remora:status" })
-    .catch(() => null) as { connected: boolean; latencyMs?: number } | null;
-  $("ws-addr").textContent = `127.0.0.1:${s.port}`;
-  if (!s.token) {
-    setState("pairing", "Pairing");
-  } else if (status?.connected) {
-    setState("connected", "Terhubung");
-  } else {
-    setState("disconnected", "Terputus");
-  }
-  $("ws-lat").textContent = status?.connected && status.latencyMs !== undefined
-    ? `${status.latencyMs} ms`
-    : "—";
+let reconnecting = false;
+
+async function fetchStatus(): Promise<ConnStatus | null> {
+  return (await chrome.runtime.sendMessage({ type: "remora:status" }).catch(() => null)) as ConnStatus | null;
 }
 
-function renderToken(token: string): void {
-  ($("token") as HTMLInputElement).value = token;
+function renderStatus(status: ConnStatus | null, port: number): void {
+  $("ws-addr").textContent = `127.0.0.1:${port}`;
+  $("ws-lat").textContent = status?.connected && status.latencyMs !== undefined ? `${status.latencyMs} ms` : "—";
+  if (!status) {
+    setState("disconnected", "Terputus");
+    $("banner-msg").textContent = "Service worker Remora tidak merespons. Muat ulang extension di chrome://extensions.";
+    $("banner-sub").textContent = "";
+    return;
+  }
+  if (status.connected) {
+    setState("connected", "Terhubung");
+    return;
+  }
+  const busy = reconnecting || status.phase === "connecting";
+  setState(busy ? "connecting" : "disconnected", busy ? "Menghubungkan…" : "Terputus");
+  $("banner-msg").textContent = status.lastError?.message ?? "Menghubungkan ke MCP server…";
+  const sub: string[] = [];
+  if (status.nextRetryAt && !busy) {
+    sub.push(`Coba otomatis dalam ${Math.max(0, Math.ceil((status.nextRetryAt - Date.now()) / 1000))} dtk`);
+  }
+  if (status.attempt > 1) sub.push(`percobaan ke-${status.attempt}`);
+  $("banner-sub").textContent = sub.join(" · ");
+}
+
+async function refreshConnection(): Promise<void> {
+  const s = await loadSettings();
+  renderStatus(await fetchStatus(), s.port);
+}
+
+async function reconnect(): Promise<void> {
+  if (reconnecting) return;
+  reconnecting = true;
+  const btn = $("btn-reconnect") as HTMLButtonElement;
+  btn.disabled = true;
+  btn.textContent = "Menghubungkan…";
+  await refreshConnection();
+  const status = (await chrome.runtime
+    .sendMessage({ type: "remora:reconnect" })
+    .catch(() => null)) as ConnStatus | null;
+  reconnecting = false;
+  btn.disabled = false;
+  btn.textContent = "Reconnect";
+  const s = await loadSettings();
+  renderStatus(status, s.port);
+  if (status?.connected) toast("Terhubung ✓");
+  else toast("Gagal terhubung — lihat pesan di atas");
 }
 
 function renderToggles(js: boolean, net: boolean): void {
@@ -196,45 +232,22 @@ async function renderLog(): Promise<void> {
 async function init(): Promise<void> {
   $("version").textContent = `v${chrome.runtime.getManifest().version}`;
   const s = await loadSettings();
-  renderToken(s.token);
   renderToggles(s.jsEvalEnabled, s.netCaptureEnabled);
-  $("pairing-config").textContent = mcpConfig(s.token || "***", s.port);
   await refreshConnection();
   await renderSites(s.blockedSites);
   await renderLog();
 
   // The worker reconnects in the background, so a one-shot read can show a
   // stale "Terputus" for as long as the popup stays open.
-  const poll = setInterval(() => void refreshConnection(), 2000);
+  const poll = setInterval(() => {
+    if (!reconnecting) void refreshConnection();
+  }, 1000);
   window.addEventListener("unload", () => clearInterval(poll));
 
-  $("btn-reconnect").addEventListener("click", async () => {
-    await chrome.runtime.sendMessage({ type: "remora:reconnect" }).catch(() => null);
-    toast("Menghubungkan ulang…");
-    setTimeout(() => void refreshConnection(), 1200);
-  });
-  $("btn-show").addEventListener("click", () => {
-    const input = $("token") as HTMLInputElement;
-    input.type = input.type === "password" ? "text" : "password";
-  });
-  $("btn-copy-token").addEventListener("click", () => {
-    const token = ($("token") as HTMLInputElement).value;
-    if (!token) return toast("Belum ada token");
-    void copyText(token, "Token disalin");
-  });
+  $("btn-reconnect").addEventListener("click", () => void reconnect());
   $("btn-copy-config").addEventListener("click", async () => {
     const cur = await loadSettings();
-    if (!cur.token) return toast("Buat token dulu (Regenerate)");
-    void copyText(mcpConfig(cur.token, cur.port), "Config MCP disalin");
-  });
-  $("btn-regen").addEventListener("click", async () => {
-    const token = randomToken();
-    await saveSettings({ token });
-    renderToken(token);
-    const cur = await loadSettings();
-    $("pairing-config").textContent = mcpConfig(token, cur.port);
-    toast("Token baru dibuat — sesi lama diputus");
-    await refreshConnection();
+    void copyText(mcpConfig(cur.port), "Config MCP disalin");
   });
   $("tgl-js").addEventListener("change", async (ev) => {
     const on = (ev.target as HTMLInputElement).checked;

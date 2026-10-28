@@ -131,7 +131,9 @@ export async function remora_status(ctx: Ctx): Promise<unknown> {
       connected: false,
       hubRole,
       agentId: ctx.hub.agentId,
-      hint: "Extension not connected. Ask the user to open Chrome with Remora installed and paired.",
+      hint:
+        "Extension not connected. Ask the user to open Chrome with Remora installed; " +
+        "the Remora popup shows why it cannot connect.",
     };
   }
   const session = await call<SessionInfo>(ctx, "session.info", {});

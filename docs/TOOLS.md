@@ -164,7 +164,7 @@ upload_file({ selector: "input[type=file]", filePath: "D:/docs/laporan.pdf" })
 
 ## Error Umum (pesan agent)
 
-- `extension tidak terhubung` → buka Chrome + pairing ulang.
+- `extension tidak terhubung` → buka Chrome dan lihat alasan di popup Remora.
 - `ref … stale` / `page navigated` → panggil `snapshot` lagi.
 - `cannot be automated` → halaman browser-internal; navigasi ke web biasa.
 - `NOT_ALLOWED` → cek toggle popup (JS eval / network capture).

@@ -19,34 +19,15 @@
       <button class="btn btn-accent btn-sm" id="btn-reconnect" type="button">Reconnect</button>
     </div>
   </div>
-  <div class="banner">Koneksi ke MCP terputus. Pastikan server berjalan, lalu tekan Reconnect.</div>
+  <div class="banner" id="banner" role="status" aria-live="polite"><span id="banner-msg">Koneksi ke MCP terputus.</span><small id="banner-sub"></small></div>
 
   <div class="pop-body">
-    <section class="sec" aria-label="Pairing">
-      <h2>Pairing MCP</h2>
-      <div class="stack">
-        <div class="pairing-panel" id="pairing-panel">
-          <div class="row-between">
-            <b style="font-size:12.5px;color:#f5d98b">Mode pairing aktif</b>
-            <span class="pill-tag on" style="background:#3a2f14;color:#fbbf24">token baru</span>
-          </div>
-          <ol>
-            <li>Salin config di bawah ke MCP client (Claude Desktop / ZCode).</li>
-            <li>Restart MCP client, lalu tekan Reconnect.</li>
-          </ol>
-          <pre id="pairing-config"></pre>
-        </div>
-        <div class="card stack">
-          <div class="token-row">
-            <input id="token" type="password" readonly value="" placeholder="Belum ada token — tekan Regenerate" aria-label="Token pairing">
-            <button class="icon-btn" id="btn-show" type="button" title="Tampilkan/sembunyikan token" aria-label="Tampilkan token">◉</button>
-            <button class="icon-btn" id="btn-copy-token" type="button" title="Salin token" aria-label="Salin token">⧉</button>
-          </div>
-          <div class="btn-row">
-            <button class="btn btn-ghost" id="btn-copy-config" type="button">Copy MCP config JSON</button>
-            <button class="btn btn-danger-ghost" id="btn-regen" type="button">Regenerate</button>
-          </div>
-          <p class="hint">Token hanya tersimpan lokal (<code>127.0.0.1</code>). Regenerate memutus sesi lama.</p>
+    <section class="sec" aria-label="Setup MCP">
+      <h2>Setup MCP</h2>
+      <div class="card stack">
+        <p class="hint">Tidak perlu token. Tambahkan Remora sekali ke tiap MCP client (Claude / ZCode), restart client, dan extension tersambung otomatis.</p>
+        <div class="btn-row">
+          <button class="btn btn-ghost" id="btn-copy-config" type="button">Copy MCP config JSON</button>
         </div>
       </div>
     </section>

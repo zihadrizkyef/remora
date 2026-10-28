@@ -36,10 +36,14 @@ export type TaskOutcome = "done" | "timeout" | "aborted";
 const DONE_SHOW_MS = 4000;
 const CUT_SHOW_MS = 6000;
 
+const PILL_ID = "remora-pill-root";
+const FAVICON_ATTR = "data-remora-favicon";
+
 function ensurePill(): void {
-  if (pillHost) return;
+  if (pillHost?.isConnected) return;
+  for (const stray of document.querySelectorAll(`#${PILL_ID}`)) stray.remove();
   pillHost = document.createElement("div");
-  pillHost.id = "remora-pill-root";
+  pillHost.id = PILL_ID;
   const shadow = pillHost.attachShadow({ mode: "open" });
   const style = document.createElement("style");
   style.textContent = `
@@ -185,6 +189,30 @@ export function releaseIndicators(): void {
   pillBox?.classList.add("hidden");
 }
 
+/** This script is retiring (a newer instance took over): leave no trace. */
+export function teardownOverlay(): void {
+  releaseIndicators();
+  pillHost?.remove();
+  pillHost = pillBox = pillLine1 = pillLine2 = null;
+  hideAnnotate();
+}
+
+/**
+ * Markers left by a script instance that lost its extension (reload/update)
+ * keep running in the page. Swapping the <title> node detaches its title
+ * observer, which would otherwise re-add the prefix forever.
+ */
+export function clearOrphanedMarkers(): void {
+  for (const stray of document.querySelectorAll(`#${PILL_ID}`)) stray.remove();
+  for (const link of document.querySelectorAll(`link[${FAVICON_ATTR}]`)) link.remove();
+  const titleEl = document.querySelector("title");
+  if (titleEl && stripPrefix(document.title) !== document.title) {
+    const clean = stripPrefix(document.title);
+    titleEl.replaceWith(titleEl.cloneNode(false));
+    document.title = clean;
+  }
+}
+
 /** Result marker on the title (✅/⚠️); null restores the page's own title. */
 function resultTitle(prefix: string | null): void {
   if (prefix) {
@@ -287,6 +315,7 @@ function applyFavicon(href: string): void {
   if (faviconLink) return;
   faviconLink = document.createElement("link");
   faviconLink.rel = "icon";
+  faviconLink.setAttribute(FAVICON_ATTR, "");
   faviconLink.href = href;
   (document.head ?? document.documentElement).appendChild(faviconLink);
 }
