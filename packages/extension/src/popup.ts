@@ -47,13 +47,19 @@ async function copyText(text: string, okMsg: string): Promise<void> {
   }
 }
 
-function mcpConfig(port: number): string {
+/**
+ * The repo path differs per machine, so the server announces its own entry
+ * (`hubEntry`); without a live server we can only emit a placeholder.
+ */
+const ENTRY_PLACEHOLDER = "<PATH-TO-REPO>/packages/mcp-server/dist/index.js";
+
+function mcpConfig(port: number, entry: string | null): string {
   return JSON.stringify(
     {
       mcpServers: {
         remora: {
           command: "node",
-          args: ["D:/Dev/Claude/Projects/Remora/packages/mcp-server/dist/index.js"],
+          args: [entry ?? ENTRY_PLACEHOLDER],
           ...(port === DEFAULT_SETTINGS.port ? {} : { env: { REMORA_PORT: String(port) } }),
         },
       },
@@ -73,6 +79,7 @@ interface ConnStatus {
   lastError: { code: string; message: string; at: number } | null;
   nextRetryAt: number | null;
   latencyMs?: number;
+  hubEntry?: string | null;
 }
 
 function setState(state: ConnState, label: string): void {
@@ -247,7 +254,13 @@ async function init(): Promise<void> {
   $("btn-reconnect").addEventListener("click", () => void reconnect());
   $("btn-copy-config").addEventListener("click", async () => {
     const cur = await loadSettings();
-    void copyText(mcpConfig(cur.port), "Config MCP disalin");
+    const entry = (await fetchStatus())?.hubEntry ?? null;
+    void copyText(
+      mcpConfig(cur.port, entry),
+      entry
+        ? "Config MCP disalin"
+        : "Config disalin — ganti <PATH-TO-REPO>, atau jalankan npm run setup:mcp",
+    );
   });
   $("tgl-js").addEventListener("change", async (ev) => {
     const on = (ev.target as HTMLInputElement).checked;

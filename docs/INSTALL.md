@@ -46,22 +46,47 @@ Hasil build:
 Tidak ada token yang perlu disalin. Extension otomatis tersambung ke
 MCP server mana pun yang berjalan di `127.0.0.1:47291`.
 
-1. Klik ikon Remora → **Copy MCP config JSON**. Hasilnya:
-   ```json
-   {
-     "mcpServers": {
-       "remora": {
-         "command": "node",
-         "args": ["D:/Dev/Claude/Projects/Remora/packages/mcp-server/dist/index.js"]
-       }
-     }
-   }
-   ```
-2. Tempel ke config tiap MCP client yang mau memakai Remora:
-   - Claude Desktop: `%APPDATA%\Claude\claude_desktop_config.json`
-   - ZCode: pengaturan MCP workspace.
-3. Restart MCP client. Popup berubah hijau "Terhubung" dalam beberapa
-   detik.
+### Cara otomatis (disarankan)
+
+```bash
+npm run build
+npm run setup:mcp
+```
+
+Script itu membaca lokasi repo-nya sendiri, jadi config selalu benar walau
+repo ada di `D:\...`, `C:\Users\...`, atau `/home/...`. Client yang terdeteksi
+langsung ditulis (file lama dibackup `.bak`):
+
+- Claude Desktop: `%APPDATA%\Claude\claude_desktop_config.json`
+- ZCode: `~/.zcode/cli/config.json`
+- Cursor: `~/.cursor/mcp.json`
+- Claude Code: `~/.claude.json`
+
+Opsi: `--dry-run` (lihat tanpa menulis), `--print` (cetak JSON saja),
+`--port 47300` (port selain default), `--all` (buat file walau app-nya belum
+pernah dijalankan). Pindah folder repo? Jalankan ulang `npm run setup:mcp`.
+
+### Cara manual
+
+Klik ikon Remora → **Copy MCP config JSON**, lalu tempel ke config client:
+
+```json
+{
+  "mcpServers": {
+    "remora": {
+      "command": "node",
+      "args": ["<PATH-TO-REPO>/packages/mcp-server/dist/index.js"]
+    }
+  }
+}
+```
+
+`<PATH-TO-REPO>` diisi otomatis oleh popup selama popup terhubung ke server
+(server mengabarkan path-nya sendiri saat connect). Kalau popup sedang
+terputus, salin path absolut repo di mesin itu — jangan pakai path dari
+mesin lain.
+
+Restart MCP client. Popup berubah hijau "Terhubung" dalam beberapa detik.
 
 Banyak client (Claude + ZCode) boleh jalan bersamaan: proses pertama
 memegang port, yang lain menumpang otomatis. Token internal antar-proses

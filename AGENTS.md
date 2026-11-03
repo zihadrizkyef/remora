@@ -76,6 +76,7 @@ npm install            # install semua workspace
 npm run build          # build protocol → mcp-server (tsc) + extension (esbuild) → dist/
 npm run typecheck      # tsc --noEmit semua package
 npm run test           # vitest (protocol + mcp-server unit)
+npm run setup:mcp      # tulis config MCP client lokal (path repo dideteksi sendiri)
 npm run dev:mcp        # jalankan MCP server (stdio) untuk debugging
 ```
 
