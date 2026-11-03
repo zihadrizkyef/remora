@@ -225,3 +225,12 @@ Drag-drop via event sintetis; file >50MB via chunking ±256KB + progress.
   (pill+badge+title+highlight terlihat) → `task_end` (pill hijau ±4s, title pulih) →
   screenshot annotated → clipboard → upload 4 skenario → JS gated → network.
 - Ikon tajam di toolbar 16px. Folder `dist/` siap rilis.
+
+## 12. Alur Git (WAJIB)
+
+- **Selalu kerja langsung di `main`.** Jangan pernah membuat branch baru
+  (feature/fix/…) dan jangan membuat PR — cukup commit lalu
+  `git push origin main`.
+- Jangan meninggalkan branch tersisa; yang ada dihapus (lokal + remote).
+- Format commit: `tipe: ringkasan` (mis. `fix: portable MCP config`), satu
+  commit untuk satu perubahan logis.
