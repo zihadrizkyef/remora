@@ -40,4 +40,5 @@ Panduan kontributor: [`AGENTS.md`](AGENTS.md)
 npm run build       # semua package → dist/
 npm run typecheck   # tsc semua workspace
 npm run test        # vitest (protocol + mcp-server)
+npm run setup:mcp   # daftarkan Remora ke MCP client lokal (path otomatis)
 ```

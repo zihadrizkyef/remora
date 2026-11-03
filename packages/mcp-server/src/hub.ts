@@ -1,4 +1,5 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   ExtensionHelloPayloadSchema,
@@ -69,6 +70,8 @@ function isAddressInUse(err: unknown): boolean {
 const PEER_GONE_GRACE_MS = 5000;
 
 const SERVER_VERSION = "0.1.0";
+/** Absolute path of the MCP entry (dist/index.js); announced so clients can self-configure. */
+const SERVER_ENTRY = fileURLToPath(new URL("./index.js", import.meta.url));
 
 class BadTokenError extends Error {}
 
@@ -270,7 +273,7 @@ export class RemoraHub {
     this.socket = ws;
     this.lastSeen = Date.now();
     this.log("extension connected, waiting for hello");
-    ws.send(JSON.stringify({ event: "welcome", payload: { server: SERVER_VERSION } }));
+    ws.send(JSON.stringify({ event: "welcome", payload: { server: SERVER_VERSION, entry: SERVER_ENTRY } }));
     ws.on("message", (data) => {
       if (this.socket === ws) this.lastSeen = Date.now();
       this.handleMessage(String(data));

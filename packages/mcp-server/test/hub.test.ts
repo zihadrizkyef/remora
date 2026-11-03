@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer } from "node:net";
+import { isAbsolute } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import { tokenProtocols } from "@remora/protocol";
 import { RemoraHub } from "../src/hub.js";
@@ -158,13 +159,16 @@ describe("hub multi-session sharing", () => {
     await primary.start();
 
     const ext = new WebSocket(`ws://127.0.0.1:${port}/remora`, tokenProtocols(TOKEN));
-    const frames: Array<{ event?: string; payload?: { t?: number } }> = [];
+    const frames: Array<{ event?: string; payload?: { t?: number; entry?: string } }> = [];
     ext.on("message", (raw) => frames.push(JSON.parse(String(raw))));
     await new Promise((resolve) => ext.once("open", resolve));
     ext.send(JSON.stringify({ event: "ping", payload: { t: 42 } }));
     for (let i = 0; i < 40 && frames.length < 2; i++) await delay(25);
 
     expect(frames[0]?.event).toBe("welcome");
+    // The popup builds the MCP config from this path, so it must be absolute.
+    expect(frames[0]?.payload?.entry).toMatch(/[\\/]index\.js$/);
+    expect(isAbsolute(frames[0]!.payload!.entry!)).toBe(true);
     expect(frames[1]).toEqual({ event: "pong", payload: { t: 42 } });
     ext.close();
   });

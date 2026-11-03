@@ -248,7 +248,7 @@ let nextRetryAt: number | null = null;
 let attempt = 0;
 let connectedAt: number | null = null;
 let lastLatencyMs: number | undefined;
-let hubInfo: { server?: string } = {};
+let hubInfo: { server?: string; entry?: string } = {};
 let pingTimer: ReturnType<typeof setInterval> | null = null;
 let readyFallback: ReturnType<typeof setTimeout> | null = null;
 let wsTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
@@ -272,6 +272,7 @@ function connStatus() {
     connectedAt,
     latencyMs: phase === "connected" ? lastLatencyMs : undefined,
     hubVersion: hubInfo.server ?? null,
+    hubEntry: hubInfo.entry ?? null,
   };
 }
 
@@ -374,6 +375,7 @@ function handleLinkFrame(raw: string): boolean {
   if (frame.event === "welcome") {
     hubInfo = {
       server: typeof frame.payload?.server === "string" ? frame.payload.server : undefined,
+      entry: typeof frame.payload?.entry === "string" ? frame.payload.entry : undefined,
     };
     markReady();
     return true;

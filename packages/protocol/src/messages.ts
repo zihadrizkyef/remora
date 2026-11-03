@@ -501,6 +501,22 @@ export const UploadProgressPayloadSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Link frames (hub -> extension, no id)
+// ---------------------------------------------------------------------------
+
+/**
+ * Sent the moment the socket is accepted. `entry` is the absolute path of the
+ * running server entry, so the popup can emit an MCP config that is correct on
+ * whatever machine and drive the repo happens to live on — the path is never
+ * baked in at build time.
+ */
+export const HubWelcomePayloadSchema = z.object({
+  server: z.string(),
+  entry: z.string().optional(),
+});
+export type HubWelcomePayload = z.infer<typeof HubWelcomePayloadSchema>;
+
+// ---------------------------------------------------------------------------
 // Notifications (MCP -> extension)
 // ---------------------------------------------------------------------------
 

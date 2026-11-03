@@ -11,6 +11,7 @@
     "build": "npm run build --workspace=@remora/protocol && npm run build --workspace=@remora/mcp-server && npm run build --workspace=@remora/extension",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
+    "setup:mcp": "node scripts/setup-mcp.mjs",
     "dev:mcp": "npm run dev --workspace=@remora/mcp-server"
   },
   "engines": {
