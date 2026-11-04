@@ -1134,6 +1134,9 @@ async function screenshotTab(tab: chrome.tabs.Tab, params: Params): Promise<unkn
 
   // captureVisibleTab always grabs the active tab of the window, so focus the
   // requested tab first or a background tab would screenshot the wrong page.
+  const displaced = tab.active
+    ? undefined
+    : (await chrome.tabs.query({ active: true, windowId: tab.windowId }))[0];
   if (!tab.active) {
     await chrome.tabs.update(tab.id!, { active: true });
     await new Promise((r) => setTimeout(r, 120));
@@ -1143,12 +1146,31 @@ async function screenshotTab(tab: chrome.tabs.Tab, params: Params): Promise<unkn
   // the agent's tab on both sides of the capture (the user may switch tabs).
   const stillOurs = async () =>
     (await chrome.tabs.query({ active: true, windowId: tab.windowId }))[0]?.id === tab.id;
+  /** Hand focus back to the tab the user had, but only while this tab is still
+   *  the visible one — a tab the user switched to themselves is left alone.
+   *  Returns whether the capture still belongs to the agent's tab. */
+  const giveFocusBack = async (): Promise<boolean> => {
+    const ours = await stillOurs();
+    if (ours && displaced?.id !== undefined && displaced.id !== tab.id) {
+      await chrome.tabs.update(displaced.id, { active: true }).catch(() => undefined);
+    }
+    return ours;
+  };
+
   if (!(await stillOurs())) throw wireError("OUT_OF_GROUP", "the visible tab changed; retry the screenshot");
-  const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
-    format: format as "png" | "jpeg",
-    quality: format === "jpeg" ? quality : undefined,
-  });
-  if (!(await stillOurs())) throw wireError("OUT_OF_GROUP", "the visible tab changed; retry the screenshot");
+  let dataUrl: string;
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, {
+      format: format as "png" | "jpeg",
+      quality: format === "jpeg" ? quality : undefined,
+    });
+  } catch (err) {
+    await giveFocusBack();
+    throw err;
+  }
+  if (!(await giveFocusBack())) {
+    throw wireError("OUT_OF_GROUP", "the visible tab changed; retry the screenshot");
+  }
 
   let clip: { x: number; y: number; width: number; height: number } | null = null;
   if (mode === "selector" || mode === "ref") {

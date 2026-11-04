@@ -31,6 +31,13 @@ sesi ditutup (±6 dtk), grey = siap.
 Konvensi respons: JSON. `screenshot`/`screenshot_annotated` mengembalikan
 gambar + metadata ringkas.
 
+Fokus tab: `screenshot` membuat tab target jadi tab aktif window sesaat
+(`captureVisibleTab` butuh tab aktif), lalu fokus dikembalikan ke tab yang
+tadi dipakai user (±150ms). Kalau user sendiri pindah tab di tengah capture,
+fokusnya tidak diambil balik dan tool gagal `OUT_OF_GROUP` — ulangi saja.
+`clipboard_read`/`clipboard_write` sebaliknya tidak memindahkan tab, jadi tab
+grup harus sudah aktif (`tab_activate`) atau gagal `OUT_OF_GROUP`.
+
 ## Koneksi
 
 | Tool | Deskripsi |
