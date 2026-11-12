@@ -40,7 +40,7 @@ export const TOOL_DEFS: ToolDef[] = [
   // -- tabs & windows -----------------------------------------------------------
   def("tabs_list", "List the tabs in YOUR Remora tab group (id, title, url, active, pinned). Tabs outside the group are never shown and cannot be touched.", "listing tabs", {}),
   def("tab_activate", "Activate (focus) a tab in your group by id.", "activating tab", { tabId: z.number().int().describe("Tab id to activate") }),
-  def("tab_create", "Open a new tab inside your Remora tab group (the group is created on first use). This is the only way to get a tab you may work in.", "opening tab", {
+  def("tab_create", "Open a new tab inside your Remora tab group (the group is created on first use). This is the only way to get a tab you may work in. Reuse your working tab with `navigate` unless you truly need pages side by side: every call leaves another open tab in the group.", "opening tab", {
     url: z.string().describe("URL to open (optional)").optional(),
     active: z.boolean().describe("Focus the new tab (default true)").optional(),
   }),

@@ -52,7 +52,7 @@ grup harus sudah aktif (`tab_activate`) atau gagal `OUT_OF_GROUP`.
 |---|---|---|
 | `tabs_list` | — | Tab di grup sesi ini saja (id, title, url, active, pinned, groupId). |
 | `tab_activate` | `tabId` | Fokuskan tab grup. |
-| `tab_create` | `url?`, `active?` | Tab baru **di dalam grup sesi** (grup dibuat saat pertama). Satu-satunya cara mendapat tab kerja. |
+| `tab_create` | `url?`, `active?` | Tab baru **di dalam grup sesi** (grup dibuat saat pertama). Satu-satunya cara mendapat tab kerja. Pakai `navigate` untuk memakai ulang tab yang sudah ada — tiap `tab_create` menambah tab baru di grup. |
 | `tab_close` | `tabId?` | Tutup tab grup (default working tab). |
 | `tab_duplicate` | `tabId?` | Duplikat tab grup; salinannya ikut grup. |
 | `tab_pin` | `tabId?`, `pinned` | Unpin saja. `pinned: true` ditolak: Chrome mengeluarkan tab yang di-pin dari grupnya. |
