@@ -18,6 +18,27 @@ interface LogEntry {
   detail: string;
 }
 
+interface DiagEntry {
+  ts: number;
+  worker: string;
+  event: string;
+  detail?: Record<string, unknown>;
+}
+
+interface DiagMeta {
+  worker: string;
+  extensionId: string;
+  version: string;
+  incognito: boolean;
+  startedAt: number;
+}
+
+interface DiagPayload {
+  meta: DiagMeta | null;
+  entries: DiagEntry[];
+  status?: ConnStatus;
+}
+
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 function toast(msg: string): void {
   const t = $("toast");
@@ -236,6 +257,64 @@ async function renderLog(): Promise<void> {
   }
 }
 
+async function readDiag(limit = 300): Promise<DiagPayload | null> {
+  return (await chrome.runtime
+    .sendMessage({ type: "remora:diag", limit })
+    .catch(() => null)) as DiagPayload | null;
+}
+
+function detailText(detail: Record<string, unknown> | undefined): string {
+  if (!detail) return "";
+  try {
+    return JSON.stringify(detail);
+  } catch {
+    return String(detail);
+  }
+}
+
+async function renderDiag(): Promise<void> {
+  const payload = await readDiag(300);
+  const entries = payload?.entries ?? [];
+  const body = $("diag-body");
+  body.innerHTML = "";
+  $("diag").classList.toggle("is-empty", entries.length === 0);
+  for (const e of entries.slice(-12).reverse()) {
+    const tr = document.createElement("tr");
+    const t = document.createElement("td");
+    t.className = "t";
+    t.textContent = fmtTime(e.ts);
+    const a = document.createElement("td");
+    a.className = "a";
+    a.textContent = e.event;
+    const g = document.createElement("td");
+    g.className = "g";
+    const text = detailText(e.detail);
+    g.textContent = text.length > 80 ? `${text.slice(0, 79)}…` : text;
+    g.title = `${e.worker} · ${text}`;
+    tr.append(t, a, g);
+    body.appendChild(tr);
+  }
+}
+
+function diagText(payload: DiagPayload | null): string {
+  const meta = payload?.meta;
+  const status = payload?.status;
+  const header = [
+    `Remora diagnostic · v${meta?.version ?? chrome.runtime.getManifest().version}`,
+    `worker=${meta?.worker ?? "?"} incognito=${meta?.incognito ?? "?"} extension=${meta?.extensionId ?? "?"}`,
+    status
+      ? `status=${status.phase} connected=${status.connected} attempt=${status.attempt} ` +
+        `lastError=${status.lastError ? `${status.lastError.code}: ${status.lastError.message}` : "none"}`
+      : "status=unknown",
+  ];
+  const lines = (payload?.entries ?? []).map((e) => {
+    const d = detailText(e.detail);
+    const ts = new Date(e.ts).toISOString();
+    return `${ts} ${e.worker} ${e.event}${d ? ` ${d}` : ""}`;
+  });
+  return [...header, ...lines].join("\n");
+}
+
 async function init(): Promise<void> {
   $("version").textContent = `v${chrome.runtime.getManifest().version}`;
   const s = await loadSettings();
@@ -243,11 +322,14 @@ async function init(): Promise<void> {
   await refreshConnection();
   await renderSites(s.blockedSites);
   await renderLog();
+  await renderDiag();
 
   // The worker reconnects in the background, so a one-shot read can show a
   // stale "Terputus" for as long as the popup stays open.
+  let ticks = 0;
   const poll = setInterval(() => {
     if (!reconnecting) void refreshConnection();
+    if (++ticks % 3 === 0) void renderDiag();
   }, 1000);
   window.addEventListener("unload", () => clearInterval(poll));
 
@@ -280,6 +362,15 @@ async function init(): Promise<void> {
     await chrome.storage.local.set({ activityLog: [] });
     await renderLog();
     toast("Log dibersihkan");
+  });
+  $("btn-diag-copy").addEventListener("click", async () => {
+    const payload = await readDiag(500);
+    await copyText(diagText(payload), "Log diagnostik disalin");
+  });
+  $("btn-diag-clear").addEventListener("click", async () => {
+    await chrome.runtime.sendMessage({ type: "remora:diag-clear" }).catch(() => null);
+    await renderDiag();
+    toast("Diagnostik dibersihkan");
   });
   $("docs-link").addEventListener("click", (ev) => {
     ev.preventDefault();

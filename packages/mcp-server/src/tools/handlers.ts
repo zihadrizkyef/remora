@@ -146,6 +146,8 @@ export async function remora_status(ctx: Ctx): Promise<unknown> {
     connected: true,
     hubRole,
     extensionVersion: ext?.version ?? "unknown",
+    extensionWorker: ext?.worker ?? null,
+    extensionIncognito: ext?.incognito ?? null,
     protocol: ext?.protocol ?? 1,
     agentId: ctx.hub.agentId,
     task: ctx.hub.tasks.active ? { label: ctx.hub.tasks.label ?? null } : null,

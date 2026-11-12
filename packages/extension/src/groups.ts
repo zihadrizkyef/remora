@@ -16,6 +16,7 @@ import {
   type OwnedGroup,
   type TabRef,
 } from "@remora/protocol";
+import { diag } from "./diag.js";
 
 const STORE_KEY = "remoraGroups";
 const MAX_HOSTS = 50;
@@ -40,7 +41,24 @@ export async function loadGroups(): Promise<OwnedGroup[]> {
   const stored = await chrome.storage.session.get({ [STORE_KEY]: [] });
   const list = Array.isArray(stored[STORE_KEY]) ? (stored[STORE_KEY] as OwnedGroup[]) : [];
   const live = await chrome.tabGroups.query({});
-  cache = pruneGroups(list, live.map((g) => g.id));
+  // A freshly started worker can see an empty tab group list for a moment
+  // while Chrome rebuilds the tab strip. Pruning on that snapshot would
+  // persist the loss of ownership, so confirm each group individually first.
+  let kept: OwnedGroup[];
+  if (live.length === 0 && list.length > 0) {
+    kept = [];
+    for (const g of list) {
+      if (await chrome.tabGroups.get(g.groupId).catch(() => null)) kept.push(g);
+    }
+  } else {
+    kept = pruneGroups(list, live.map((g) => g.id));
+  }
+  cache = kept;
+  diag("groups.load", {
+    stored: list.map((g) => ({ groupId: g.groupId, agentId: g.agentId })),
+    live: live.map((g) => g.id),
+    kept: cache.map((g) => g.groupId),
+  });
   if (cache.length !== list.length) await persist();
   return cache;
 }
@@ -78,6 +96,7 @@ export async function rememberHost(groupId: number, url: string | undefined): Pr
 export async function forgetGroup(groupId: number): Promise<void> {
   visuals.delete(groupId);
   if (!(await loadGroups()).some((g) => g.groupId === groupId)) return;
+  diag("group.forget", { groupId });
   await updateGroups((list) => list.filter((g) => g.groupId !== groupId));
 }
 
@@ -106,14 +125,17 @@ export async function createGroupedTab(
   try {
     if (g) {
       await chrome.tabs.group({ groupId: g.groupId, tabIds: tab.id! });
+      diag("group.tab", { agentId, groupId: g.groupId, tabId: tab.id, reused: true, windowId: tab.windowId });
     } else {
       const groupId = await chrome.tabs.group({ tabIds: tab.id!, createProperties: { windowId: tab.windowId } });
       const owned: OwnedGroup = { groupId, agentId, createdAt: Date.now(), label: opts.label, hosts: [] };
       await updateGroups((list) => [...list.filter((x) => x.agentId !== agentId), owned]);
+      diag("group.tab", { agentId, groupId, tabId: tab.id, reused: false, windowId: tab.windowId });
       if (opts.label) showRunning(groupId, opts.label, 0);
       else paintNow(groupId, "ready");
     }
   } catch (err) {
+    diag("group.tab.error", { agentId, tabId: tab.id, message: err instanceof Error ? err.message : String(err) });
     await chrome.tabs.remove(tab.id!).catch(() => undefined);
     throw err;
   }
@@ -193,8 +215,12 @@ export function showResult(groupId: number, outcome: "done" | "timeout" | "abort
  */
 export async function releaseSession(agentId: string): Promise<number[]> {
   const g = await groupFor(agentId);
-  if (!g) return [];
+  if (!g) {
+    diag("group.release.miss", { agentId });
+    return [];
+  }
   const tabIds = (await chrome.tabs.query({ groupId: g.groupId })).map((t) => t.id!).filter((id) => id >= 0);
+  diag("group.release", { agentId, groupId: g.groupId, tabs: tabIds.length });
   await updateGroups((list) => list.filter((x) => x.agentId !== agentId));
   showResult(g.groupId, "aborted");
   setTimeout(() => {

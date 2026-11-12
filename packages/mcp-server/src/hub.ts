@@ -52,6 +52,8 @@ export interface ExtensionInfo {
   protocol: number;
   tabCount: number;
   connectedAt: number;
+  worker?: string;
+  incognito?: boolean;
 }
 
 interface Pending {
@@ -262,7 +264,10 @@ export class RemoraHub {
       return;
     }
     if (this.socket) {
-      this.log("replacing previous extension connection");
+      this.log(
+        `replacing previous extension connection (was v${this.info?.version ?? "?"}, ` +
+          `${this.info?.tabCount ?? "?"} tabs, age ${this.info ? Math.round((Date.now() - this.info.connectedAt) / 1000) : "?"}s)`,
+      );
       try {
         this.socket.close(WS_CLOSE.REPLACED, "replaced");
       } catch {
@@ -278,11 +283,11 @@ export class RemoraHub {
       if (this.socket === ws) this.lastSeen = Date.now();
       this.handleMessage(String(data));
     });
-    ws.on("close", () => {
+    ws.on("close", (code, reason) => {
       if (this.socket === ws) {
         this.socket = null;
         this.info = null;
-        this.log("extension disconnected");
+        this.log(`extension disconnected (code ${code}${reason ? `: ${String(reason)}` : ""})`);
         this.failAllPending({ code: "NO_EXTENSION", message: "extension disconnected" });
         this.broadcastState();
       }
@@ -336,7 +341,10 @@ export class RemoraHub {
           return;
         }
         this.info = { ...parsed.data, connectedAt: Date.now() };
-        this.log(`hello from extension v${parsed.data.version} (${parsed.data.tabCount} tabs)`);
+        this.log(
+          `hello from extension v${parsed.data.version} worker=${parsed.data.worker ?? "?"} ` +
+            `incognito=${parsed.data.incognito ?? false} (${parsed.data.tabCount} tabs)`,
+        );
         this.broadcastState();
         break;
       }
@@ -423,8 +431,11 @@ export class RemoraHub {
         if (parsed.success) this.notify("session.end", parsed.data);
       }
     });
-    ws.on("close", () => this.dropPeer(ws));
-    ws.on("error", () => this.dropPeer(ws));
+    ws.on("close", (code, reason) => this.dropPeer(ws, code, String(reason ?? "")));
+    ws.on("error", (err) => {
+      this.log(`peer socket error: ${String(err)}`);
+      this.dropPeer(ws);
+    });
   }
 
   /**
@@ -432,14 +443,18 @@ export class RemoraHub {
    * group forever. Release it unless the same agent re-attaches shortly:
    * peers reconnect within ~1s after a hub handover.
    */
-  private dropPeer(ws: WebSocket): void {
+  private dropPeer(ws: WebSocket, code?: number, reason?: string): void {
     if (!this.peers.delete(ws)) return;
-    this.log("peer MCP process detached");
     const agentId = this.peerAgents.get(ws);
+    this.log(
+      `peer MCP process detached${agentId ? ` (${agentId})` : ""}` +
+        `${code !== undefined ? ` code ${code}${reason ? `: ${reason}` : ""}` : ""}`,
+    );
     this.peerAgents.delete(ws);
     if (!agentId) return;
     const timer = setTimeout(() => {
       if (this.stopped || [...this.peerAgents.values()].includes(agentId)) return;
+      this.log(`peer ${agentId} did not re-attach within ${PEER_GONE_GRACE_MS}ms; releasing its session`);
       this.notify("session.end", { agentId });
     }, PEER_GONE_GRACE_MS);
     timer.unref?.();
@@ -588,10 +603,11 @@ export class RemoraHub {
         }
       }
     });
-    ws.on("close", () => {
+    ws.on("close", (code, reason) => {
       if (this.control !== ws) return;
       this.control = null;
       this.peerState = { connected: false, extension: null };
+      this.log(`hub link dropped (code ${code}${reason ? `: ${String(reason)}` : ""}); reattaching`);
       this.failAllPending({ code: "NO_EXTENSION", message: "hub link dropped" });
       this.scheduleReattach();
     });

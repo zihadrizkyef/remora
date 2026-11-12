@@ -456,6 +456,9 @@ export const ExtensionHelloPayloadSchema = z.object({
   version: z.string(),
   protocol: z.number().int(),
   tabCount: z.number().int().nonnegative(),
+  /** Random id per service-worker start; tells a reconnect from a restart. */
+  worker: z.string().optional(),
+  incognito: z.boolean().optional(),
 });
 export type ExtensionHelloPayload = z.infer<typeof ExtensionHelloPayloadSchema>;
 

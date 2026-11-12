@@ -51,6 +51,7 @@ import {
   updateGroups,
 } from "./groups.js";
 import { isSiteBlocked, isWireError, loadSettings, wireError } from "./shared.js";
+import { clearDiag, diag, readDiag, workerTag } from "./diag.js";
 
 // ---------------------------------------------------------------------------
 // State
@@ -122,14 +123,29 @@ async function boot(): Promise<void> {
   await clearLegacyBlockRules().catch(() => undefined);
   await loadGroups().catch(() => undefined);
   await rebuildBlockRules().catch(() => undefined);
+  const [tabs, windows] = await Promise.all([
+    chrome.tabs.query({}).catch(() => []),
+    chrome.windows.getAll({}).catch(() => []),
+  ]);
+  diag("worker.boot", {
+    tabs: tabs.length,
+    windows: windows.length,
+    incognito: chrome.extension.inIncognitoContext === true,
+    port: settingsPort,
+  });
   connect();
 }
+
+chrome.runtime.onSuspend.addListener(() => {
+  diag("worker.suspend", { phase });
+});
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   capturingTabs.delete(tabId);
   const agentId = agentTabs.get(tabId);
   agentTabs.delete(tabId);
   if (agentId) sendEvent("tab_closed", { tabId, agentId });
+  diag("tab.closed", { tabId, agentId: agentId ?? null });
   recentActivity.delete(tabId);
   clearTabBadge(tabId).catch(() => undefined);
   scheduleBlockRebuild();
@@ -171,6 +187,7 @@ chrome.tabs.onCreated.addListener((tab) => {
 
 // Closing or ungrouping the whole group ends the session's access to it.
 chrome.tabGroups.onRemoved.addListener((group) => {
+  diag("group.removed", { groupId: group.id });
   void forgetGroup(group.id).then(() => scheduleBlockRebuild());
 });
 
@@ -214,6 +231,16 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     return false;
   }
+  if (type === "remora:diag") {
+    void readDiag(Number((msg as { limit?: unknown }).limit) || 300).then((payload) =>
+      sendResponse({ ...payload, status: connStatus() }),
+    );
+    return true;
+  }
+  if (type === "remora:diag-clear") {
+    void clearDiag().then(() => sendResponse({ cleared: true }));
+    return true;
+  }
   return false;
 });
 
@@ -224,6 +251,12 @@ if (chrome.alarms) {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name !== "remora-keepalive") return;
     void booted.then(() => {
+      diag("alarm.tick", {
+        phase,
+        hasWs: ws !== null,
+        hasTimer: reconnectTimer !== null,
+        silentMs: lastSeenAt === null ? null : Date.now() - lastSeenAt,
+      });
       if (!ws && !reconnectTimer) connect();
     });
   });
@@ -252,6 +285,7 @@ let hubInfo: { server?: string; entry?: string } = {};
 let pingTimer: ReturnType<typeof setInterval> | null = null;
 let readyFallback: ReturnType<typeof setTimeout> | null = null;
 let wsTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+let lastSeenAt: number | null = null;
 let staleClose = false;
 const settleWaiters = new Set<() => void>();
 
@@ -322,21 +356,30 @@ function connect(): void {
   attempt++;
   let opened = false;
   staleClose = false;
+  diag("ws.connect", { url: wsUrl(), attempt, phase });
   const socket = new WebSocket(wsUrl(), [WS_SUBPROTOCOL]);
   ws = socket;
   socket.onopen = () => {
     if (ws !== socket) return;
     opened = true;
+    diag("ws.open", { attempt, url: wsUrl() });
     resetWsTimeout();
     readyFallback = setTimeout(() => {
       if (ws === socket && phase === "connecting") markReady();
     }, READY_FALLBACK_MS);
     void chrome.tabs.query({}).then((tabs) => {
       if (ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+      diag("hello.send", { tabs: tabs.length });
       socket.send(
         JSON.stringify({
           event: "hello",
-          payload: { version: chrome.runtime.getManifest().version, protocol: 1, tabCount: tabs.length },
+          payload: {
+            version: chrome.runtime.getManifest().version,
+            protocol: 1,
+            tabCount: tabs.length,
+            worker: workerTag,
+            incognito: chrome.extension.inIncognitoContext === true,
+          },
         }),
       );
     });
@@ -354,13 +397,24 @@ function connect(): void {
     ws = null;
     wsReady = false;
     connectedAt = null;
+    lastSeenAt = null;
     stopLinkTimers();
     lastError = classifyClose(ev.code, ev.reason, opened);
+    diag("ws.close", {
+      code: ev.code,
+      reason: ev.reason,
+      wasClean: ev.wasClean,
+      opened,
+      phase,
+      classified: lastError.code,
+      message: lastError.message,
+    });
     scheduleReconnect(lastError.code);
     settled();
   };
   socket.onerror = () => {
     // Chrome gives no detail here; onclose follows with the code we report.
+    diag("ws.error", { attempt, phase });
   };
 }
 
@@ -400,6 +454,7 @@ function markReady(): void {
   lastError = null;
   attempt = 0;
   reconnectDelayMs = 1000;
+  diag("ws.ready", { hubVersion: hubInfo.server ?? null, latencyMs: lastLatencyMs ?? null });
   sendPing();
   pingTimer = setInterval(sendPing, WS_PING_MS);
   settled();
@@ -475,8 +530,10 @@ function detach(socket: WebSocket): void {
 function resetWsTimeout(): void {
   if (wsTimeoutTimer) clearTimeout(wsTimeoutTimer);
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  lastSeenAt = Date.now();
   wsTimeoutTimer = setTimeout(() => {
     if (ws?.readyState === WebSocket.OPEN) {
+      diag("ws.stale", { silentMs: lastSeenAt === null ? null : Date.now() - lastSeenAt });
       staleClose = true;
       ws.close();
     }
@@ -502,6 +559,7 @@ function scheduleReconnect(code: ConnErrorCode): void {
   }
   phase = "retrying";
   nextRetryAt = Date.now() + waitMs;
+  diag("ws.retry", { code, waitMs, phase });
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     connect();
@@ -542,16 +600,21 @@ async function handleFrame(raw: string): Promise<void> {
       return;
     }
     try {
+      const tabIdParam = (params as Record<string, unknown> | undefined)?.tabId ?? null;
+      diag("req", { method, agentId, tabId: tabIdParam });
       const result = await dispatch(method, (params ?? {}) as Record<string, unknown>, agentId);
       send({ id, ok: true, result: result ?? {} });
     } catch (err) {
       if (isWireError(err)) {
+        diag("req.error", { method, agentId, code: err.code, message: err.message });
         send({ id, ok: false, error: { code: err.code, message: err.message } });
       } else {
+        const message = err instanceof Error ? err.message : String(err);
+        diag("req.error", { method, agentId, code: "INTERNAL", message });
         send({
           id,
           ok: false,
-          error: { code: "INTERNAL", message: err instanceof Error ? err.message : String(err) },
+          error: { code: "INTERNAL", message },
         });
       }
     }
@@ -570,6 +633,7 @@ function handleNotification(notification: string, payload: unknown): void {
     recentActivity.set(p.tabId, { action: p.action, target: p.target, ts: Date.now(), task: p.task });
     void setTabBadge(p.tabId, p.action, p.target, !!p.task);
     if (p.task && p.task.step <= 1) {
+      diag("task.start", { tabId: p.tabId, agentId: p.agentId ?? null, label: p.task.label ?? null });
       void appendActivityLog(p.tabId, "task start", p.task.label);
     }
     void appendActivityLog(p.tabId, p.action ?? "working", p.target);
@@ -586,6 +650,7 @@ function handleNotification(notification: string, payload: unknown): void {
     const parsed = TaskEndPayloadSchema.safeParse(payload);
     if (!parsed.success) return;
     const p = parsed.data;
+    diag("task.end", { tabId: p.tabId, agentId: p.agentId ?? null, outcome: p.outcome, steps: p.steps });
     recentActivity.delete(p.tabId);
     void showResultBadge(p.tabId, p.outcome);
     void appendActivityLog(p.tabId, `task ${p.outcome}`, `${p.steps} langkah`);
@@ -606,7 +671,9 @@ function handleNotification(notification: string, payload: unknown): void {
   if (notification === "session.end") {
     const parsed = SessionEndPayloadSchema.safeParse(payload);
     if (!parsed.success) return;
+    diag("session.end", { agentId: parsed.data.agentId });
     void releaseSession(parsed.data.agentId).then((tabIds) => {
+      diag("session.released", { agentId: parsed.data.agentId, tabs: tabIds.length });
       for (const tabId of tabIds) revokeTab(tabId);
       scheduleBlockRebuild();
     });
@@ -709,12 +776,30 @@ async function resolveTab(agentId: string, tabId?: number): Promise<chrome.tabs.
   if (tabId !== undefined) {
     tab = await chrome.tabs.get(tabId).catch(() => undefined);
     const verdict = checkTab(tab && toRef(tab), agentId, groups);
-    if (!verdict.ok) throw wireError("OUT_OF_GROUP", verdict.message);
+    if (!verdict.ok) {
+      diag("tab.reject", {
+        agentId,
+        tabId,
+        found: tab !== undefined,
+        tabGroupId: tab?.groupId ?? null,
+        ownedGroups: groups.map((x) => x.groupId),
+      });
+      throw wireError("OUT_OF_GROUP", verdict.message);
+    }
   } else {
     const g = groups.find((x) => x.agentId === agentId);
     const tabs = g ? await chrome.tabs.query({ groupId: g.groupId }) : [];
     const verdict = resolveImplicitTab(tabs.map(toRef), agentId, groups);
-    if (!verdict.ok) throw wireError("OUT_OF_GROUP", verdict.message);
+    if (!verdict.ok) {
+      diag("tab.reject", {
+        agentId,
+        tabId: null,
+        groupId: g?.groupId ?? null,
+        groupTabs: tabs.length,
+        ownedGroups: groups.map((x) => x.groupId),
+      });
+      throw wireError("OUT_OF_GROUP", verdict.message);
+    }
     tab = tabs.find((t) => t.id === verdict.tabId);
   }
   if (!tab?.id) throw wireError("OUT_OF_GROUP", OUT_OF_GROUP_MESSAGE);
@@ -851,6 +936,17 @@ async function dispatch(method: string, params: Params, agentId: string): Promis
       const g = await groupFor(agentId);
       const mine = g ? all.filter((t) => t.groupId === g.groupId) : [];
       const info = g ? await chrome.tabGroups.get(g.groupId).catch(() => null) : null;
+      const groups = await loadGroups();
+      diag("session.info", {
+        agentId,
+        allTabs: all.length,
+        groupId: g?.groupId ?? null,
+        groupTabs: mine.length,
+        liveGroup: info !== null,
+        ownedGroups: groups.map((x) => x.groupId),
+        incognito: chrome.extension.inIncognitoContext === true,
+        windows: new Set(all.map((t) => t.windowId)).size,
+      });
       return {
         groupId: g?.groupId ?? null,
         title: info?.title,
