@@ -2,6 +2,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { WebSocket, WebSocketServer } from "ws";
 import {
+  ExtensionFocusPayloadSchema,
   ExtensionHelloPayloadSchema,
   NavigatedPayloadSchema,
   SessionEndPayloadSchema,
@@ -54,12 +55,26 @@ export interface ExtensionInfo {
   connectedAt: number;
   worker?: string;
   incognito?: boolean;
+  instanceId?: string;
+  /** How many extension instances (Chrome profiles) the hub is serving. */
+  instances?: number;
 }
 
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: WireError) => void;
   timer: NodeJS.Timeout;
+  link: ExtLink | null;
+}
+
+/** One connected Chrome extension profile (one service worker). */
+interface ExtLink {
+  ws: WebSocket;
+  /** Stable id stored by the extension in chrome.storage.local (per profile). */
+  instanceId: string;
+  info: ExtensionInfo | null;
+  lastSeen: number;
+  focused: boolean;
 }
 
 type HubMode = "server" | "peer";
@@ -81,9 +96,11 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 export class RemoraHub {
   private wss: WebSocketServer | null = null;
-  private socket: WebSocket | null = null;
-  private lastSeen = 0;
-  private info: ExtensionInfo | null = null;
+  private links = new Set<ExtLink>();
+  /** Which extension profile each agent session works in; sticky once set. */
+  private agentLink = new Map<string, ExtLink>();
+  private focusedLink: ExtLink | null = null;
+  private anonSeq = 0;
   private pending = new Map<string, Pending>();
   private heartbeat: NodeJS.Timeout | null = null;
   private log: (msg: string) => void;
@@ -126,11 +143,19 @@ export class RemoraHub {
 
   get connected(): boolean {
     if (this.mode === "peer") return this.peerState.connected;
-    return this.socket !== null && this.socket.readyState === WebSocket.OPEN;
+    return this.openLinks().length > 0;
   }
 
   get extension(): ExtensionInfo | null {
-    return this.mode === "peer" ? this.peerState.extension : this.info;
+    if (this.mode === "peer") return this.peerState.extension;
+    const links = this.openLinks().filter((l) => l.info !== null);
+    if (links.length === 0) return null;
+    const primary = this.focusedLink && links.includes(this.focusedLink) ? this.focusedLink : links[0]!;
+    return { ...primary.info!, tabCount: links.reduce((n, l) => n + (l.info?.tabCount ?? 0), 0), instances: links.length };
+  }
+
+  private openLinks(): ExtLink[] {
+    return [...this.links].filter((l) => l.ws.readyState === WebSocket.OPEN);
   }
 
   /** True when this process owns the port instead of forwarding to another hub. */
@@ -170,9 +195,16 @@ export class RemoraHub {
       }
     }
     this.peers.clear();
-    this.socket?.close();
-    this.socket = null;
-    this.info = null;
+    for (const link of this.links) {
+      try {
+        link.ws.close();
+      } catch {
+        /* ignore */
+      }
+    }
+    this.links.clear();
+    this.agentLink.clear();
+    this.focusedLink = null;
     await new Promise<void>((resolve) => {
       if (!this.wss) return resolve();
       this.wss.close(() => resolve());
@@ -220,17 +252,18 @@ export class RemoraHub {
     );
     wss.on("error", (err) => this.log(`server error: ${String(err)}`));
     this.heartbeat = setInterval(() => {
-      const ws = this.socket;
-      if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      // A suspended or crashed worker never sends a close frame; drop the
-      // dead link so the next tool call fails fast with NO_EXTENSION.
-      if (Date.now() - this.lastSeen > WS_STALE_MS) {
-        this.log("extension silent too long, dropping link");
-        ws.close(WS_CLOSE.STALE, "stale");
-        setTimeout(() => ws.terminate(), 1000).unref?.();
-        return;
+      for (const link of [...this.links]) {
+        if (link.ws.readyState !== WebSocket.OPEN) continue;
+        // A suspended or crashed worker never sends a close frame; drop the
+        // dead link so the next tool call fails fast with NO_EXTENSION.
+        if (Date.now() - link.lastSeen > WS_STALE_MS) {
+          this.log(`extension ${link.instanceId.slice(0, 8)} silent too long, dropping link`);
+          link.ws.close(WS_CLOSE.STALE, "stale");
+          setTimeout(() => link.ws.terminate(), 1000).unref?.();
+          continue;
+        }
+        link.ws.send(JSON.stringify({ event: "heartbeat" }));
       }
-      ws.send(JSON.stringify({ event: "heartbeat" }));
     }, WS_HEARTBEAT_MS);
     this.heartbeat.unref?.();
   }
@@ -263,34 +296,27 @@ export class RemoraHub {
       ws.close(WS_CLOSE.UNKNOWN_PATH, "unknown path");
       return;
     }
-    if (this.socket) {
-      this.log(
-        `replacing previous extension connection (was v${this.info?.version ?? "?"}, ` +
-          `${this.info?.tabCount ?? "?"} tabs, age ${this.info ? Math.round((Date.now() - this.info.connectedAt) / 1000) : "?"}s)`,
-      );
-      try {
-        this.socket.close(WS_CLOSE.REPLACED, "replaced");
-      } catch {
-        /* ignore */
-      }
-      this.failAllPending({ code: "INTERNAL", message: "extension reconnected" });
-    }
-    this.socket = ws;
-    this.lastSeen = Date.now();
-    this.log("extension connected, waiting for hello");
+    const link: ExtLink = {
+      ws,
+      instanceId: `anon-${++this.anonSeq}`,
+      info: null,
+      lastSeen: Date.now(),
+      focused: false,
+    };
+    this.links.add(link);
+    this.log(
+      `extension connected, waiting for hello (${this.links.size} instance${this.links.size === 1 ? "" : "s"} connected)`,
+    );
     ws.send(JSON.stringify({ event: "welcome", payload: { server: SERVER_VERSION, entry: SERVER_ENTRY } }));
     ws.on("message", (data) => {
-      if (this.socket === ws) this.lastSeen = Date.now();
-      this.handleMessage(String(data));
+      link.lastSeen = Date.now();
+      this.handleMessage(String(data), link);
     });
     ws.on("close", (code, reason) => {
-      if (this.socket === ws) {
-        this.socket = null;
-        this.info = null;
-        this.log(`extension disconnected (code ${code}${reason ? `: ${String(reason)}` : ""})`);
-        this.failAllPending({ code: "NO_EXTENSION", message: "extension disconnected" });
-        this.broadcastState();
-      }
+      this.log(
+        `extension socket closed (${link.instanceId.slice(0, 8)}, code ${code}${reason ? `: ${String(reason)}` : ""})`,
+      );
+      this.removeLink(link);
     });
     ws.on("error", (err) => this.log(`socket error: ${String(err)}`));
   }
@@ -303,7 +329,7 @@ export class RemoraHub {
     return allowed.length === 0 || allowed.includes(m[1]!);
   }
 
-  private handleMessage(raw: string): void {
+  private handleMessage(raw: string, link: ExtLink): void {
     let frame;
     try {
       frame = parseWireFrame(raw);
@@ -316,7 +342,7 @@ export class RemoraHub {
       return;
     }
     if (frame.kind === "event") {
-      this.handleEvent(frame.value.event, frame.value.payload);
+      this.handleEvent(frame.value.event, frame.value.payload, link);
       return;
     }
     this.log(`ignoring unexpected frame kind: ${frame.kind}`);
@@ -331,25 +357,47 @@ export class RemoraHub {
     else p.reject(error ?? { code: "INTERNAL", message: "empty error" });
   }
 
-  private handleEvent(event: string, payload: unknown): void {
+  private handleEvent(event: string, payload: unknown, link: ExtLink): void {
     switch (event) {
       case "hello": {
         const parsed = ExtensionHelloPayloadSchema.safeParse(payload);
         if (!parsed.success) {
           this.log("bad hello payload, closing");
-          this.socket?.close(WS_CLOSE.BAD_HELLO, "bad hello");
+          link.ws.close(WS_CLOSE.BAD_HELLO, "bad hello");
           return;
         }
-        this.info = { ...parsed.data, connectedAt: Date.now() };
+        const instanceId = parsed.data.instanceId ?? link.instanceId;
+        if (parsed.data.instanceId) {
+          // Same Chrome profile reconnecting (service worker restart): the new
+          // socket takes over the bindings; profiles have distinct ids, so a
+          // second profile never evicts the first.
+          const previous = [...this.links].find(
+            (l) => l !== link && l.instanceId === parsed.data.instanceId && l.ws.readyState === WebSocket.OPEN,
+          );
+          if (previous) this.adopt(previous, link);
+        }
+        link.instanceId = instanceId;
+        link.info = { ...parsed.data, connectedAt: Date.now() };
+        if (parsed.data.focused === true || this.focusedLink === null) this.setFocused(link, false);
         this.log(
-          `hello from extension v${parsed.data.version} worker=${parsed.data.worker ?? "?"} ` +
-            `incognito=${parsed.data.incognito ?? false} (${parsed.data.tabCount} tabs)`,
+          `hello from extension v${parsed.data.version} instance=${instanceId.slice(0, 8)} ` +
+            `worker=${parsed.data.worker ?? "?"} incognito=${parsed.data.incognito ?? false} ` +
+            `focused=${link.focused} (${parsed.data.tabCount} tabs)`,
         );
         this.broadcastState();
         break;
       }
+      case "focus": {
+        const parsed = ExtensionFocusPayloadSchema.safeParse(payload);
+        if (!parsed.success || parsed.data.focused !== true) break;
+        if (this.setFocused(link, true)) {
+          this.log(`focus moved to extension instance ${link.instanceId.slice(0, 8)}`);
+          this.broadcastState();
+        }
+        break;
+      }
       case "ping": {
-        this.socket?.send(JSON.stringify({ event: "pong", payload }));
+        link.ws.send(JSON.stringify({ event: "pong", payload }));
         break;
       }
       case "tab_closed": {
@@ -381,6 +429,50 @@ export class RemoraHub {
       default:
         this.log(`unknown event: ${event}`);
     }
+  }
+
+  /** Move an agent's session (and the focus) from an old socket to its replacement. */
+  private adopt(previous: ExtLink, next: ExtLink): void {
+    this.log(
+      `instance ${previous.instanceId.slice(0, 8)} reconnected; replacing its previous socket ` +
+        `(was v${previous.info?.version ?? "?"}, ${previous.info?.tabCount ?? "?"} tabs)`,
+    );
+    for (const [agentId, bound] of this.agentLink) {
+      if (bound === previous) this.agentLink.set(agentId, next);
+    }
+    if (this.focusedLink === previous) this.focusedLink = next;
+    next.focused = previous.focused;
+    this.links.delete(previous);
+    this.failAllPending({ code: "NO_EXTENSION", message: "extension reconnected" }, previous);
+    try {
+      previous.ws.close(WS_CLOSE.REPLACED, "replaced");
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Set the focused instance; returns true when the focus actually moved. */
+  private setFocused(link: ExtLink, log: boolean): boolean {
+    if (this.focusedLink === link && link.focused) return false;
+    for (const other of this.links) other.focused = other === link;
+    this.focusedLink = link;
+    if (log) this.log(`focused extension instance ${link.instanceId.slice(0, 8)}`);
+    return true;
+  }
+
+  /** Remove a dead socket; its agents fall back to the focused instance. */
+  private removeLink(link: ExtLink): void {
+    if (!this.links.delete(link)) return;
+    for (const [agentId, bound] of this.agentLink) {
+      if (bound === link) this.agentLink.delete(agentId);
+    }
+    if (this.focusedLink === link) {
+      this.focusedLink = this.openLinks().find((l) => l.info !== null) ?? null;
+      if (this.focusedLink) this.focusedLink.focused = true;
+    }
+    this.log(`extension instance ${link.instanceId.slice(0, 8)} disconnected (${this.links.size} left)`);
+    this.failAllPending({ code: "NO_EXTENSION", message: "extension disconnected" }, link);
+    this.broadcastState();
   }
 
   // -- peer MCP processes (primary side) ------------------------------------
@@ -640,12 +732,13 @@ export class RemoraHub {
     markClosed(tabId);
   }
 
-  private failAllPending(err: WireError): void {
-    for (const [, p] of this.pending) {
+  private failAllPending(err: WireError, only?: ExtLink): void {
+    for (const [id, p] of this.pending) {
+      if (only && p.link !== only) continue;
+      this.pending.delete(id);
       clearTimeout(p.timer);
       p.reject(err);
     }
-    this.pending.clear();
   }
 
   /** Send a request to the extension, as this session, and await its response. */
@@ -670,13 +763,60 @@ export class RemoraHub {
     if (this.mode === "peer") {
       return this.requestViaControl<T>(method, params, agentId, timeoutMs);
     }
-    if (!this.connected || !this.socket) {
+    const candidates = this.candidatesFor(agentId);
+    if (candidates.length === 0) {
       return Promise.reject({
         code: "NO_EXTENSION",
-        message: "Chrome extension is not connected. Open Chrome with Remora installed and paired.",
+        message: "Chrome extension is not connected. Open Chrome with Remora installed.",
       } satisfies WireError);
     }
-    return this.dispatch<T>(this.socket, method, params, agentId, timeoutMs);
+    return this.dispatchWithFallback<T>(candidates, method, params, agentId, timeoutMs);
+  }
+
+  /**
+   * A session stays in the profile it started in (sticky); a fresh session
+   * goes to the profile whose Chrome window has focus. Other instances are
+   * only tried while the session is still unbound.
+   */
+  private candidatesFor(agentId: string): ExtLink[] {
+    const open = this.openLinks();
+    const bound = this.agentLink.get(agentId);
+    if (bound) {
+      if (open.includes(bound)) return [bound];
+      this.agentLink.delete(agentId);
+    }
+    const focused = this.focusedLink && open.includes(this.focusedLink) ? this.focusedLink : undefined;
+    return focused ? [focused, ...open.filter((l) => l !== focused)] : open;
+  }
+
+  private async dispatchWithFallback<T>(
+    links: ExtLink[],
+    method: WireMethodName,
+    params: unknown,
+    agentId: string,
+    timeoutMs: number,
+  ): Promise<T> {
+    const bound = this.agentLink.has(agentId);
+    let lastError: WireError | null = null;
+    for (let i = 0; i < links.length; i++) {
+      const link = links[i]!;
+      try {
+        const result = await this.dispatch<T>(link.ws, method, params, agentId, timeoutMs, link);
+        if (!bound) {
+          this.agentLink.set(agentId, link);
+          this.log(`session ${agentId} bound to extension instance ${link.instanceId.slice(0, 8)}`);
+        }
+        return result;
+      } catch (err) {
+        lastError = err as WireError;
+        // A lookup miss proves the call did nothing there, so trying the next
+        // profile is safe; timeouts and page errors are not retried.
+        const retryable =
+          lastError.code === "OUT_OF_GROUP" || lastError.code === "NO_TAB" || lastError.code === "NO_EXTENSION";
+        if (bound || !retryable || i === links.length - 1) throw err;
+      }
+    }
+    throw lastError ?? ({ code: "NO_EXTENSION", message: "no extension instance" } satisfies WireError);
   }
 
   private requestViaControl<T>(
@@ -701,6 +841,7 @@ export class RemoraHub {
     params: unknown,
     agentId: string,
     timeoutMs: number,
+    link: ExtLink | null = null,
   ): Promise<T> {
     const id = randomUUID();
     return new Promise<T>((resolve, reject) => {
@@ -709,7 +850,7 @@ export class RemoraHub {
         reject({ code: "TIMEOUT", message: `extension did not answer ${method} in time` } satisfies WireError);
       }, timeoutMs);
       timer.unref?.();
-      this.pending.set(id, { resolve: (v) => resolve(v as T), reject, timer });
+      this.pending.set(id, { resolve: (v) => resolve(v as T), reject, timer, link });
       ws.send(JSON.stringify({ id, method, params: params ?? {}, agentId }), (err) => {
         if (!err) return;
         this.pending.delete(id);
@@ -719,7 +860,7 @@ export class RemoraHub {
     });
   }
 
-  /** Fire-and-forget notification to the extension (e.g. activity.show). */
+  /** Fire-and-forget notification to the extensions (e.g. activity.show). */
   notify(notification: string, payload?: unknown): void {
     if (this.mode === "peer") {
       const ws = this.control;
@@ -728,11 +869,15 @@ export class RemoraHub {
       }
       return;
     }
-    if (!this.connected || !this.socket) return;
-    try {
-      this.socket.send(JSON.stringify({ notification, payload: payload ?? {} }));
-    } catch (err) {
-      this.log(`notify failed: ${String(err)}`);
+    // Broadcast: every instance ignores agents/tabs it does not own, and a
+    // session's group can only exist in the profile that created it.
+    const raw = JSON.stringify({ notification, payload: payload ?? {} });
+    for (const link of this.openLinks()) {
+      try {
+        link.ws.send(raw);
+      } catch (err) {
+        this.log(`notify failed: ${String(err)}`);
+      }
     }
   }
 

@@ -118,5 +118,8 @@ Remora memberi agent AI kendali besar atas browser user. Risiko utama:
 2. Nyalakan JS eval / network capture hanya per-sesi, matikan sesudahnya.
 3. Isi `extensionIds` di config bila ada extension lain yang tidak
    dipercaya di profil Chrome yang sama.
-4. Jangan load extension Remora di profil Chrome yang dipakai untuk
-   hal paling sensitif — gunakan profil terpisah bila perlu.
+4. Beberapa profil Chrome boleh aktif bersamaan: tiap sesi agent terikat
+   sticky ke satu profil (default: window yang fokus) dan hanya bisa
+   menyentuh tab group miliknya di profil itu. Jangan aktifkan Remora di
+   profil Chrome yang dipakai untuk hal paling sensitif — matikan toggle
+   extension di profil itu, atau gunakan profil terpisah.

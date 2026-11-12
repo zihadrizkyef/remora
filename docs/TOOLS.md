@@ -42,7 +42,7 @@ grup harus sudah aktif (`tab_activate`) atau gagal `OUT_OF_GROUP`.
 
 | Tool | Deskripsi |
 |---|---|
-| `remora_status` | Status bridge: extension terhubung?, versi, `agentId`, grup sesi ini (`group`), jumlah tab lain yang disembunyikan (`hiddenTabs`), aksi terakhir di tab grup. |
+| `remora_status` | Status bridge: extension terhubung?, versi, `agentId`, `extensionInstances` (jumlah profil Chrome yang terhubung), grup sesi ini (`group`), jumlah tab lain yang disembunyikan (`hiddenTabs`), aksi terakhir di tab grup. |
 | `task_begin` | Umumkan tugas mulai (`label?`, maks 60 karakter). Indikator menyala sampai `task_end`. |
 | `task_end` | Umumkan tugas selesai. Panggil sebelum jawaban akhir; tanpa ini indikator baru padam setelah 90 detik dan tampil sebagai "berhenti tanpa sinyal selesai". |
 

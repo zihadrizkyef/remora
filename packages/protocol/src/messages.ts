@@ -459,8 +459,18 @@ export const ExtensionHelloPayloadSchema = z.object({
   /** Random id per service-worker start; tells a reconnect from a restart. */
   worker: z.string().optional(),
   incognito: z.boolean().optional(),
+  /** Stable per Chrome profile (stored in chrome.storage.local). */
+  instanceId: z.string().optional(),
+  focused: z.boolean().optional(),
 });
 export type ExtensionHelloPayload = z.infer<typeof ExtensionHelloPayloadSchema>;
+
+/** A profile's Chrome window gained focus; the hub prefers it for new sessions. */
+export const ExtensionFocusPayloadSchema = z.object({
+  focused: z.boolean(),
+  worker: z.string().optional(),
+});
+export type ExtensionFocusPayload = z.infer<typeof ExtensionFocusPayloadSchema>;
 
 export const AgentActivityPayloadSchema = z.object({
   tabId: z.number().int(),

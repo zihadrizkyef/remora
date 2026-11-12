@@ -75,6 +75,22 @@ let settingsPort = DEFAULT_WS_PORT;
 let jsEvalEnabled = false;
 let netCaptureEnabled = false;
 let blockedSites: string[] = [];
+/** Stable per Chrome profile; lets the hub tell a worker restart from a new profile. */
+let instanceId = "";
+
+async function ensureInstanceId(): Promise<string> {
+  const stored = await chrome.storage.local.get({ remoraInstanceId: "" });
+  const existing = typeof stored.remoraInstanceId === "string" ? stored.remoraInstanceId : "";
+  if (existing) return existing;
+  const id = crypto.randomUUID();
+  await chrome.storage.local.set({ remoraInstanceId: id });
+  return id;
+}
+
+async function currentFocused(): Promise<boolean> {
+  const win = await chrome.windows.getLastFocused({ windowTypes: ["normal"] }).catch(() => null);
+  return win?.focused === true;
+}
 
 const capturingTabs = new Map<number, { pattern?: string; entries: NetEntry[] }>();
 const completedAt = new Map<string, number>();
@@ -118,6 +134,7 @@ async function boot(): Promise<void> {
   // Pairing tokens are gone; drop what older builds stored.
   await chrome.storage.local.remove("token").catch(() => undefined);
   await refreshSettings();
+  instanceId = await ensureInstanceId().catch(() => "");
   registerNetListeners();
   // Older builds kept global dynamic block rules; blocking is now per group.
   await clearLegacyBlockRules().catch(() => undefined);
@@ -132,6 +149,7 @@ async function boot(): Promise<void> {
     windows: windows.length,
     incognito: chrome.extension.inIncognitoContext === true,
     port: settingsPort,
+    instanceId,
   });
   connect();
 }
@@ -262,6 +280,18 @@ if (chrome.alarms) {
   });
 }
 
+// Every profile runs its own worker; the hub sends new agent sessions to the
+// profile whose Chrome window the user is looking at.
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  void chrome.windows
+    .get(windowId)
+    .then((win) => {
+      if (win.focused) sendEvent("focus", { focused: true, worker: workerTag });
+    })
+    .catch(() => undefined);
+});
+
 // ---------------------------------------------------------------------------
 // WebSocket client
 // ---------------------------------------------------------------------------
@@ -367,9 +397,11 @@ function connect(): void {
     readyFallback = setTimeout(() => {
       if (ws === socket && phase === "connecting") markReady();
     }, READY_FALLBACK_MS);
-    void chrome.tabs.query({}).then((tabs) => {
+    void (async () => {
+      const tabs = await chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[]);
+      const focused = await currentFocused();
       if (ws !== socket || socket.readyState !== WebSocket.OPEN) return;
-      diag("hello.send", { tabs: tabs.length });
+      diag("hello.send", { tabs: tabs.length, instanceId, focused });
       socket.send(
         JSON.stringify({
           event: "hello",
@@ -379,10 +411,12 @@ function connect(): void {
             tabCount: tabs.length,
             worker: workerTag,
             incognito: chrome.extension.inIncognitoContext === true,
+            instanceId,
+            focused,
           },
         }),
       );
-    });
+    })();
   };
   socket.onmessage = (ev) => {
     if (ws !== socket) return;
@@ -632,20 +666,25 @@ function handleNotification(notification: string, payload: unknown): void {
     const parsed = ActivityShowSchema.safeParse(payload);
     if (!parsed.success) return;
     const p = parsed.data;
-    recentActivity.set(p.tabId, { action: p.action, target: p.target, ts: Date.now(), task: p.task });
-    void setTabBadge(p.tabId, p.action, p.target, !!p.task);
-    if (p.task && p.task.step <= 1) {
-      diag("task.start", { tabId: p.tabId, agentId: p.agentId ?? null, label: p.task.label ?? null });
-      void appendActivityLog(p.tabId, "task start", p.task.label);
-    }
-    void appendActivityLog(p.tabId, p.action ?? "working", p.target);
-    void chrome.tabs
-      .sendMessage(p.tabId, { type: "remora:activity", action: p.action, target: p.target, task: p.task })
-      .catch(() => undefined);
-    if (p.agentId && p.task) {
-      const task = p.task;
-      void groupFor(p.agentId).then((g) => g && showRunning(g.groupId, task.label, task.step));
-    }
+    void (async () => {
+      // Other Chrome profiles get this broadcast too; only the instance that
+      // owns the tab may render it or write to its audit log.
+      if (!(await chrome.tabs.get(p.tabId).catch(() => null))) return;
+      recentActivity.set(p.tabId, { action: p.action, target: p.target, ts: Date.now(), task: p.task });
+      void setTabBadge(p.tabId, p.action, p.target, !!p.task);
+      if (p.task && p.task.step <= 1) {
+        diag("task.start", { tabId: p.tabId, agentId: p.agentId ?? null, label: p.task.label ?? null });
+        void appendActivityLog(p.tabId, "task start", p.task.label);
+      }
+      void appendActivityLog(p.tabId, p.action ?? "working", p.target);
+      void chrome.tabs
+        .sendMessage(p.tabId, { type: "remora:activity", action: p.action, target: p.target, task: p.task })
+        .catch(() => undefined);
+      if (p.agentId && p.task) {
+        const task = p.task;
+        void groupFor(p.agentId).then((g) => g && showRunning(g.groupId, task.label, task.step));
+      }
+    })();
     return;
   }
   if (notification === "task.end") {
@@ -653,21 +692,25 @@ function handleNotification(notification: string, payload: unknown): void {
     if (!parsed.success) return;
     const p = parsed.data;
     diag("task.end", { tabId: p.tabId, agentId: p.agentId ?? null, outcome: p.outcome, steps: p.steps });
-    recentActivity.delete(p.tabId);
-    void showResultBadge(p.tabId, p.outcome);
-    void appendActivityLog(p.tabId, `task ${p.outcome}`, `${p.steps} langkah`);
-    if (p.agentId && p.outcome !== "aborted") {
-      void groupFor(p.agentId).then((g) => g && showResult(g.groupId, p.outcome, p.label));
-    }
-    void chrome.tabs
-      .sendMessage(p.tabId, {
-        type: "remora:task_end",
-        outcome: p.outcome,
-        label: p.label,
-        steps: p.steps,
-        durationMs: p.durationMs,
-      })
-      .catch(() => undefined);
+    void (async () => {
+      const tab = await chrome.tabs.get(p.tabId).catch(() => null);
+      if (!tab) return;
+      recentActivity.delete(p.tabId);
+      void showResultBadge(p.tabId, p.outcome);
+      void appendActivityLog(p.tabId, `task ${p.outcome}`, `${p.steps} langkah`);
+      if (p.agentId && p.outcome !== "aborted") {
+        void groupFor(p.agentId).then((g) => g && showResult(g.groupId, p.outcome, p.label));
+      }
+      void chrome.tabs
+        .sendMessage(p.tabId, {
+          type: "remora:task_end",
+          outcome: p.outcome,
+          label: p.label,
+          steps: p.steps,
+          durationMs: p.durationMs,
+        })
+        .catch(() => undefined);
+    })();
     return;
   }
   if (notification === "session.end") {

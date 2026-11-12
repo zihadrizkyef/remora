@@ -102,22 +102,24 @@ Banner merah di popup menyebut penyebabnya:
 |---|---|---|
 | Server MCP tidak berjalan | Tidak ada proses Remora di port | Buka Claude / ZCode yang memuat Remora |
 | MCP server masih versi lama | Proses lama dari sebelum update | Tutup lalu buka lagi Claude / ZCode |
-| Diambil alih instance Remora lain | Remora aktif di dua profil Chrome dan keduanya berebut satu hub | Matikan / remove Remora di salah satu profil (lihat di bawah) |
+| Diambil alih instance Remora lain | Service worker di profil yang sama diganti socket barunya (restart SW); binding dipindahkan otomatis | Tidak perlu tindakan; kalau berulang tiap ±30 dtk, pastikan semua proses MCP memakai build terbaru |
 | Tidak ada di daftar extensionIds | `extensionIds` di config membatasi extension | Tambahkan id extension ini, atau hapus daftarnya |
 | Versi tidak cocok | Server/extension beda build | `npm run build`, reload extension, restart MCP client |
 
-**Remora harus aktif di satu profil Chrome saja.** Kalau diaktifkan di dua
-profil (mis. profil kerja + pribadi, sama-sama memakai Chrome yang sama),
-kedua service worker bergantian mengambil alih koneksi hub tiap ±30 detik
-(`close code 4000 REPLACED`). Gejalanya: popup sesekali "Terputus",
-`tabs_list`/`session.info` tiba-tiba kosong, dan grup agent dianggap hilang
-walaupun tab-nya masih terbuka.
+**Beberapa profil Chrome boleh aktif bersamaan.** Tiap profil punya
+koneksi sendiri ke hub (dibedakan dengan `instanceId` yang disimpan di
+`chrome.storage.local`), jadi tidak ada lagi saling tendang. Sesi agent
+baru otomatis diikat ke profil yang **window Chrome-nya sedang fokus**,
+lalu sticky selama sesi itu hidup:
 
-Cara memastikan/memperbaiki:
+1. Fokuskan window Chrome di profil tujuan (klik window-nya).
+2. Jalankan tool pertama dari sesi agent tersebut (`tab_create` adalah
+   pilihan paling jelas).
+3. Setelah terikat, memindahkan fokus ke profil lain tidak memindahkan
+   sesi itu — buat sesi agent baru untuk menggarap profil lain.
 
-1. Buka `chrome://extensions` di **profil yang tidak dipakai** agent.
-2. Matikan toggle Remora (atau Remove).
-3. Di profil yang dipakai, buka popup Remora → **Reconnect**.
+`remora_status` menampilkan `extensionInstances` (jumlah profil yang
+terhubung). Tab group tetap terpisah per sesi per profil.
 
 Popup punya bagian **Diagnostik** (tombol *Copy log*) yang mencatat semua
 kejadian koneksi — sertakan log itu kalau melapor masalah.

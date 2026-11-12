@@ -193,3 +193,117 @@ describe("hub multi-session sharing", () => {
     await new Promise<void>((resolve) => foreign.close(() => resolve()));
   }, 15000);
 });
+
+describe("hub multi-profile extensions", () => {
+  async function fakeExtension(port: number, instanceId: string, label: string, focused: boolean) {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/remora`, tokenProtocols(TOKEN));
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once("error", reject);
+    });
+    const methods: string[] = [];
+    const notifications: string[] = [];
+    ws.on("message", (raw) => {
+      const frame = JSON.parse(String(raw)) as {
+        id?: string;
+        method?: string;
+        notification?: string;
+      };
+      if (frame.notification) {
+        notifications.push(frame.notification);
+        return;
+      }
+      if (!frame.id) return;
+      methods.push(frame.method ?? "");
+      ws.send(JSON.stringify({ id: frame.id, ok: true, result: { from: label } }));
+    });
+    ws.send(
+      JSON.stringify({
+        event: "hello",
+        payload: { version: "0.1.0", protocol: 1, tabCount: 1, instanceId, focused },
+      }),
+    );
+    return { ws, methods, notifications };
+  }
+
+  async function waitFor(check: () => boolean, ms = 3000): Promise<void> {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (check()) return;
+      await delay(25);
+    }
+    throw new Error("timed out waiting for condition");
+  }
+
+  it("serves two Chrome profiles side by side and binds sessions to the focused one", async () => {
+    const port = await freePort();
+    const hub = track(new RemoraHub({ port, token: TOKEN }));
+    await hub.start();
+
+    const agentA = track(new RemoraHub({ port, token: TOKEN }));
+    await agentA.start();
+    const agentB = track(new RemoraHub({ port, token: TOKEN }));
+    await agentB.start();
+
+    const extA = await fakeExtension(port, "profile-a", "A", true);
+    const extB = await fakeExtension(port, "profile-b", "B", false);
+    await waitFor(() => agentA.extension?.instances === 2);
+    expect(extA.ws.readyState).toBe(WebSocket.OPEN);
+    expect(extB.ws.readyState).toBe(WebSocket.OPEN);
+
+    // A fresh session lands in the focused profile and stays there.
+    const first = await agentA.request<{ from: string }>("tabs.list", {});
+    expect(first.from).toBe("A");
+    expect(extA.methods).toContain("tabs.list");
+
+    // The user switches to the other Chrome window: a new session follows.
+    extB.ws.send(JSON.stringify({ event: "focus", payload: { focused: true } }));
+    await delay(100);
+    const other = await agentB.request<{ from: string }>("tabs.list", {});
+    expect(other.from).toBe("B");
+
+    // The first session must not jump profiles when focus moves again.
+    extA.ws.send(JSON.stringify({ event: "focus", payload: { focused: true } }));
+    const again = await agentA.request<{ from: string }>("tabs.list", {});
+    expect(again.from).toBe("A");
+
+    extA.ws.close();
+    extB.ws.close();
+  });
+
+  it("replaces the stale socket of the same profile and keeps its session binding", async () => {
+    const port = await freePort();
+    const hub = track(new RemoraHub({ port, token: TOKEN }));
+    await hub.start();
+    const agent = track(new RemoraHub({ port, token: TOKEN }));
+    await agent.start();
+
+    const old = await fakeExtension(port, "profile-a", "old", true);
+    const first = await agent.request<{ from: string }>("tabs.list", {});
+    expect(first.from).toBe("old");
+
+    const closed = new Promise<number>((resolve) => old.ws.once("close", (code) => resolve(code)));
+    const fresh = await fakeExtension(port, "profile-a", "fresh", false);
+    expect(await closed).toBe(4000);
+
+    const after = await agent.request<{ from: string }>("tabs.list", {});
+    expect(after.from).toBe("fresh");
+    fresh.ws.close();
+  });
+
+  it("broadcasts session notifications to every connected profile", async () => {
+    const port = await freePort();
+    const hub = track(new RemoraHub({ port, token: TOKEN }));
+    await hub.start();
+
+    const extA = await fakeExtension(port, "profile-a", "A", true);
+    const extB = await fakeExtension(port, "profile-b", "B", false);
+    await delay(100);
+
+    hub.notify("session.end", { agentId: "agent-x" });
+    await waitFor(() => extA.notifications.includes("session.end") && extB.notifications.includes("session.end"));
+
+    extA.ws.close();
+    extB.ws.close();
+  });
+});

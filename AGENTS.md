@@ -115,6 +115,14 @@ Load extension: `chrome://extensions` → Developer mode → Load unpacked →
   di grup, bukan tab aktif window. Cookies/downloads/clipboard/net_block
   dibatasi ke grup. Mekanisme klaim lama (`tab_claim`/`tab_release`,
   `TAB_CLAIMED`) dihapus karena digantikan grup.
+- Multi-profil Chrome: hub melayani beberapa instance extension sekaligus
+  (satu per profil, dibedakan `instanceId` stabil di `chrome.storage.local`).
+  Sesi agent diikat **sticky** ke satu instance — default window yang
+  sedang fokus; fallback ke instance lain hanya saat belum terikat dan
+  error-nya `OUT_OF_GROUP`/`NO_TAB`/`NO_EXTENSION`. Notifikasi
+  (`activity.show`, `task.end`, `session.end`) di-broadcast; tiap instance
+  mengabaikan agent/tab yang bukan miliknya. Restart worker di profil yang
+  sama mengganti socket lama dengan `REPLACED` dan memindahkan binding.
 - Navigasi: `navigate`, `go_back`, `go_forward`, `reload`
 - Persepsi: `snapshot`, `page_text`, `page_html`, `query`, `page_info`,
   `console_logs`, `page_errors`
