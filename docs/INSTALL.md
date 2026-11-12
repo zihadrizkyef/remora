@@ -102,9 +102,25 @@ Banner merah di popup menyebut penyebabnya:
 |---|---|---|
 | Server MCP tidak berjalan | Tidak ada proses Remora di port | Buka Claude / ZCode yang memuat Remora |
 | MCP server masih versi lama | Proses lama dari sebelum update | Tutup lalu buka lagi Claude / ZCode |
-| Diambil alih koneksi lain | Remora aktif di profil Chrome lain | Matikan salah satunya |
+| Diambil alih instance Remora lain | Remora aktif di dua profil Chrome dan keduanya berebut satu hub | Matikan / remove Remora di salah satu profil (lihat di bawah) |
 | Tidak ada di daftar extensionIds | `extensionIds` di config membatasi extension | Tambahkan id extension ini, atau hapus daftarnya |
 | Versi tidak cocok | Server/extension beda build | `npm run build`, reload extension, restart MCP client |
+
+**Remora harus aktif di satu profil Chrome saja.** Kalau diaktifkan di dua
+profil (mis. profil kerja + pribadi, sama-sama memakai Chrome yang sama),
+kedua service worker bergantian mengambil alih koneksi hub tiap ±30 detik
+(`close code 4000 REPLACED`). Gejalanya: popup sesekali "Terputus",
+`tabs_list`/`session.info` tiba-tiba kosong, dan grup agent dianggap hilang
+walaupun tab-nya masih terbuka.
+
+Cara memastikan/memperbaiki:
+
+1. Buka `chrome://extensions` di **profil yang tidak dipakai** agent.
+2. Matikan toggle Remora (atau Remove).
+3. Di profil yang dipakai, buka popup Remora → **Reconnect**.
+
+Popup punya bagian **Diagnostik** (tombol *Copy log*) yang mencatat semua
+kejadian koneksi — sertakan log itu kalau melapor masalah.
 
 ## 5. Uji Cepat (Smoke Test)
 

@@ -487,7 +487,9 @@ function classifyClose(code: number, reason: string, opened: boolean): ConnError
       return {
         code: "REPLACED",
         at,
-        message: "Diambil alih koneksi Remora lain (profil Chrome lain?). Dicoba lagi dalam 30 detik.",
+        message:
+          "Diambil alih instance Remora lain — biasanya extension aktif di dua profil Chrome. " +
+          "Matikan Remora di salah satu profil (chrome://extensions), lalu tekan Reconnect.",
       };
     case WS_CLOSE.STALE:
       return { code: "STALE", at, message: "Server memutus koneksi karena extension tidak merespons." };
